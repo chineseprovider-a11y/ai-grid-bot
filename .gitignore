@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+data/*.csv
+models/*.keras
+models/*.pkl
+.streamlit/secrets.toml
+.claude/
