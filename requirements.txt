@@ -1,9 +1,9 @@
-ccxt
 streamlit
 pandas
-plotly
 numpy<2
-tensorflow-cpu
+plotly
+ccxt
 ta
 scikit-learn
 joblib
+tensorflow-cpu
