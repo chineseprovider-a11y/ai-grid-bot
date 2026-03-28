@@ -103,7 +103,10 @@ class GridBacktest:
             equity.append(total_equity)
             peak_balance = max(peak_balance, total_equity)
 
-        net_profit = total_profit - total_fees
+        # Реальная прибыль = финальный equity - начальный депозит
+        final_equity = equity[-1] if equity else self.investment
+        real_net_profit = final_equity - self.investment
+
         win_trades = sum(1 for t in trades if t.side == "sell" and t.profit > 0)
         sell_trades = sum(1 for t in trades if t.side == "sell")
         win_rate = win_trades / sell_trades if sell_trades > 0 else 0
@@ -119,7 +122,7 @@ class GridBacktest:
             strategy="grid",
             total_profit=round(total_profit, 4),
             total_fees=round(total_fees, 4),
-            net_profit=round(net_profit, 4),
+            net_profit=round(real_net_profit, 4),
             total_trades=len(trades),
             win_trades=win_trades,
             loss_trades=sell_trades - win_trades,
@@ -303,7 +306,10 @@ class AIGridBacktest(GridBacktest):
             holdings_value = sum(p["amount"] * price for p in holdings.values())
             equity.append(balance + holdings_value)
 
-        net_profit = total_profit - total_fees
+        # Реальная прибыль = финальный equity - начальный депозит
+        final_equity = equity[-1] if equity else self.investment
+        real_net_profit = final_equity - self.investment
+
         win_trades = sum(1 for t in trades if t.side == "sell" and t.profit > 0)
         sell_trades = sum(1 for t in trades if t.side == "sell")
         win_rate = win_trades / sell_trades if sell_trades > 0 else 0
@@ -315,7 +321,7 @@ class AIGridBacktest(GridBacktest):
             strategy="ai_grid",
             total_profit=round(total_profit, 4),
             total_fees=round(total_fees, 4),
-            net_profit=round(net_profit, 4),
+            net_profit=round(real_net_profit, 4),
             total_trades=len(trades),
             win_trades=win_trades,
             loss_trades=sell_trades - win_trades,
