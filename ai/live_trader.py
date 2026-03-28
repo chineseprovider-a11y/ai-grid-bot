@@ -136,6 +136,10 @@ class LiveGridTrader:
                 "last_prediction_time": None,
                 "accuracy": 0.5,
                 "correct": 0, "total": 0,
+                "grid_range_pct": self.config.range_pct,
+                "grid_shift": 0.0,
+                "size_multiplier": 1.0,
+                "take_profit_pct": 0.0,
             },
             "pending_orders": {},
             "trade_history": [],
@@ -206,11 +210,37 @@ class LiveGridTrader:
     # Сетка
     # ═══════════════════════════════════════════
 
-    def setup_grid(self, price: float):
-        """Настраивает сетку уровней вокруг текущей цены."""
+    def setup_grid(self, price: float, ai_signal: float = 0.0):
+        """
+        Настраивает сетку уровней вокруг текущей цены.
+        AI влияет на:
+        1. Динамический диапазон — bullish сужает (меньше риск), bearish расширяет
+        2. Смещение центра — bullish сдвигает вверх (больше уровней для продажи)
+        """
         rp = self.config.range_pct
-        lower = price * (1 - rp / 100)
-        upper = price * (1 + rp / 100)
+
+        # ═══ AI: Динамический диапазон ═══
+        if self.model and abs(ai_signal) > 0.1:
+            if ai_signal > 0.3:
+                # Bullish: сужаем диапазон (цена скорее пойдёт вверх, не нужен широкий)
+                rp *= (1 - ai_signal * 0.3)  # до -30% при signal=1.0
+            elif ai_signal < -0.3:
+                # Bearish: расширяем диапазон (ловим больше уровней при падении)
+                rp *= (1 + abs(ai_signal) * 0.3)  # до +30%
+            rp = max(1.0, min(rp, 5.0))  # Ограничиваем 1-5%
+
+        # ═══ AI: Смещение центра сетки ═══
+        shift = 0.0
+        if self.model and abs(ai_signal) > 0.2:
+            # Bullish: сдвигаем сетку вверх (центр выше текущей цены)
+            # Bearish: сдвигаем вниз (больше уровней для покупки)
+            shift = ai_signal * 0.3  # до 30% от диапазона
+
+        half_range = price * rp / 100
+        center = price * (1 + shift * rp / 100)
+        lower = center - half_range
+        upper = center + half_range
+
         step = (upper - lower) / self.config.grid_count
         levels = [round(lower + i * step, 8) for i in range(1, self.config.grid_count)]
 
@@ -218,8 +248,11 @@ class LiveGridTrader:
         self.state["grid"]["upper"] = upper
         self.state["grid"]["levels"] = levels
 
-        logger.info("📐 Сетка: %.2f — %.2f (%d уровней, шаг %.2f)",
-                    lower, upper, len(levels), step)
+        ai_info = ""
+        if self.model:
+            ai_info = f" | AI: range={rp:.1f}%, shift={shift:+.1f}"
+        logger.info("📐 Сетка: %.2f — %.2f (%d уровней, шаг %.2f%s)",
+                    lower, upper, len(levels), step, ai_info)
 
     # ═══════════════════════════════════════════
     # AI предсказания
@@ -265,10 +298,16 @@ class LiveGridTrader:
 
             ai_state["last_prediction_time"] = datetime.now(timezone.utc).isoformat()
 
+            # Записываем AI-параметры для дашборда
+            sig = ai_state["signal"]
+            ai_state["size_multiplier"] = round(max(0.6, min(1.0 + sig * 0.5, 1.5)), 2)
+            ai_state["take_profit_pct"] = round(sig * 1.5 if sig > 0.3 else (sig * 0.3 if sig < -0.3 else 0.0), 2)
+
             directions = ["📉 Bearish", "↔️ Sideways", "📈 Bullish"]
             idx = int(np.argmax(probs))
-            logger.info("🧠 AI: %s (signal=%.2f, conf=%.0f%%)",
-                       directions[idx], ai_state["signal"], probs[idx] * 100)
+            logger.info("🧠 AI: %s (signal=%.2f, conf=%.0f%%, size=x%.1f, tp=%.1f%%)",
+                       directions[idx], ai_state["signal"], probs[idx] * 100,
+                       ai_state["size_multiplier"], ai_state["take_profit_pct"])
 
         except Exception as e:
             logger.error("AI prediction error: %s", e)
@@ -312,16 +351,39 @@ class LiveGridTrader:
 
         # 4. Настройка сетки если ещё не настроена
         if not grid["levels"]:
-            self.setup_grid(price)
+            self.setup_grid(price, ai_signal)
 
         # 5. Проверяем диапазон
         if price < grid["lower"] or price > grid["upper"]:
             logger.info("⚡ Цена %.2f вышла за диапазон [%.2f, %.2f] — перенастройка",
                        price, grid["lower"], grid["upper"])
             self._cancel_all_orders()
-            self.setup_grid(price)
+            self.setup_grid(price, ai_signal)
             grid["bought_levels"] = {}
             return
+
+        # ═══ AI: Адаптивный размер ордера ═══
+        base_order_size = grid["order_size"]
+        if self.model and abs(ai_signal) > 0.2:
+            # Bullish: увеличиваем размер покупки (до +50%)
+            # Bearish: уменьшаем размер (до -40%)
+            size_multiplier = 1.0 + ai_signal * 0.5
+            size_multiplier = max(0.6, min(size_multiplier, 1.5))
+            adjusted_order_size = base_order_size * size_multiplier
+        else:
+            adjusted_order_size = base_order_size
+            size_multiplier = 1.0
+
+        # ═══ AI: Динамический take-profit ═══
+        # Базовый TP: продаём когда цена >= уровня сетки (0%)
+        # Bullish: ждём доп. прибыль перед продажей
+        # Bearish: продаём быстрее (даже с маленькой прибылью)
+        if self.model and ai_signal > 0.3:
+            take_profit_pct = ai_signal * 1.5  # до 1.5% доп. прибыли при signal=1.0
+        elif self.model and ai_signal < -0.3:
+            take_profit_pct = ai_signal * 0.3  # отрицательный = продаём раньше
+        else:
+            take_profit_pct = 0.0
 
         # 6. Торговая логика
         if self.state["status"] != "running":
@@ -334,22 +396,23 @@ class LiveGridTrader:
             lvl_key = str(lvl)
 
             # ═══ BUY ═══
-            if price <= lvl and lvl_key not in bought and balance >= order_size:
-                # AI фильтр
+            if price <= lvl and lvl_key not in bought and balance >= adjusted_order_size:
+                # AI фильтр: блокируем покупки при сильном bearish
                 if ai_signal < -0.4:
                     continue
 
-                # RSI фильтр (если есть данные)
-                # ... можно добавить позже
+                # AI: при умеренном bearish (-0.2..-0.4) покупаем только на нижних уровнях
+                if ai_signal < -0.2 and self.model:
+                    grid_mid = (grid["lower"] + grid["upper"]) / 2
+                    if lvl > grid_mid:
+                        continue  # Пропускаем верхние уровни при bearish
 
-                # Проверка безопасности
-                amount = order_size / price
+                amount = adjusted_order_size / price
                 allowed, reason = self.safety.check_can_buy(self.state, price, amount)
                 if not allowed:
                     logger.info("🛡️ Покупка заблокирована: %s", reason)
                     continue
 
-                # Размещаем ордер
                 order = self._place_order("buy", price, amount, lvl)
                 if order:
                     bought[lvl_key] = {
@@ -357,26 +420,36 @@ class LiveGridTrader:
                         "buy_price": price,
                         "buy_time": datetime.now(timezone.utc).isoformat(),
                         "order_id": order.get("id", ""),
+                        "ai_signal_at_buy": round(ai_signal, 3),
+                        "size_multiplier": round(size_multiplier, 2),
                     }
-                    self.state["balance"] -= order_size
+                    self.state["balance"] -= adjusted_order_size
+                    ai_tag = f" [AI x{size_multiplier:.1f}]" if self.model else ""
                     self._log_trade("buy", price, amount, order)
+                    if self.model:
+                        logger.info("🧠 AI BUY: signal=%.2f, size=x%.1f, order=$%.2f",
+                                   ai_signal, size_multiplier, adjusted_order_size)
 
             # ═══ SELL ═══
             elif price >= lvl and lvl_key in bought:
                 pos = bought[lvl_key]
+                buy_price = pos["buy_price"]
+                price_gain_pct = (price - buy_price) / buy_price * 100
 
-                # AI фильтр: задержка продажи при сильном bullish
-                if ai_signal > 0.5:
-                    buy_time = pos.get("buy_time", "")
-                    if buy_time:
-                        try:
-                            dt = datetime.fromisoformat(buy_time)
-                            hold_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
-                            price_gain = (price - pos["buy_price"]) / pos["buy_price"]
-                            if hold_hours < 24 and price_gain < 0.01:
-                                continue  # Подождём
-                        except Exception:
-                            pass
+                # ═══ AI: Динамический take-profit ═══
+                if self.model and take_profit_pct > 0:
+                    # Bullish: ждём доп. прибыль
+                    if price_gain_pct < take_profit_pct:
+                        # Но не ждём дольше 48 часов
+                        buy_time = pos.get("buy_time", "")
+                        if buy_time:
+                            try:
+                                dt = datetime.fromisoformat(buy_time)
+                                hold_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+                                if hold_hours < 48:
+                                    continue  # Ждём большей прибыли
+                            except Exception:
+                                pass
 
                 # Стоп-лосс проверка
                 if self.safety.check_should_force_sell(pos, price):
@@ -386,12 +459,15 @@ class LiveGridTrader:
                 order = self._place_order("sell", price, amount, lvl)
                 if order:
                     sell_value = amount * price
-                    buy_cost = amount * pos["buy_price"]
+                    buy_cost = amount * buy_price
                     fee = sell_value * self.config.fee_rate
                     profit = sell_value - buy_cost - fee * 2
                     self.state["balance"] += sell_value
                     del bought[lvl_key]
                     self._log_trade("sell", price, amount, order, profit)
+                    if self.model:
+                        logger.info("🧠 AI SELL: gain=%.2f%%, tp_target=%.2f%%, signal=%.2f",
+                                   price_gain_pct, take_profit_pct, ai_signal)
 
         # Стоп-лосс для всех позиций
         for lvl_key in list(bought.keys()):
