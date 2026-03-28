@@ -191,8 +191,8 @@ st.markdown(f'<div class="status-bar">{"".join(chips)}</div>', unsafe_allow_html
 
 
 # ─── Вкладки (логичный порядок) ───
-tab_start, tab_backtest, tab_optimize, tab_live = st.tabs([
-    "🚀 Старт", "📈 Бэктест", "🔧 Оптимизация", "🔮 Прогноз",
+tab_start, tab_backtest, tab_optimize, tab_live, tab_trading = st.tabs([
+    "🚀 Старт", "📈 Бэктест", "🔧 Оптимизация", "🔮 Прогноз", "💰 Торговля",
 ])
 
 
@@ -659,3 +659,138 @@ with tab_live:
             st.error(f"Не хватает зависимостей: {e}")
         except Exception as e:
             st.error(f"Ошибка: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# TAB: Live Trading — мониторинг и управление
+# ═══════════════════════════════════════════════════════════════
+with tab_trading:
+    import json as _json
+    from glob import glob
+
+    st.markdown("Мониторинг live-бота и управление торговлей")
+
+    # Ищем файлы состояния
+    state_files = glob(os.path.join(DATA_DIR, "live_state_*.json"))
+
+    if not state_files:
+        st.info("🤖 Бот ещё не запущен")
+        st.markdown("""
+        ### Как начать торговлю
+
+        **1. Получите API ключи Binance Testnet:**
+        - Перейдите на [testnet.binance.vision](https://testnet.binance.vision/)
+        - Войдите через GitHub
+        - Сгенерируйте API Key и Secret
+
+        **2. Запустите бота:**
+        ```bash
+        export BINANCE_API_KEY="ваш_testnet_ключ"
+        export BINANCE_API_SECRET="ваш_testnet_секрет"
+        python -m ai.live_trader
+        ```
+
+        **3. Мониторинг:**
+        Эта вкладка покажет статус бота в реальном времени.
+
+        ---
+        ⚠️ **Начните с Testnet** — торговля фейковыми деньгами на реальном рынке.
+        """)
+    else:
+        # Загружаем состояние
+        state_path = state_files[0]
+        with open(state_path) as f:
+            live_state = _json.load(f)
+
+        status = live_state.get("status", "unknown")
+        symbol = live_state.get("symbol", "?")
+        equity = live_state.get("current_equity", 0)
+        investment = live_state.get("initial_investment", 0)
+        pnl = equity - investment
+        pnl_pct = (pnl / investment * 100) if investment > 0 else 0
+
+        # Статус
+        status_emoji = {"running": "🟢", "paused": "⏸️", "stopped": "⏹️", "error": "🔴"}
+        st.markdown(f"### {status_emoji.get(status, '❓')} {symbol} — {status.upper()}")
+
+        # Метрики
+        color = "green" if pnl >= 0 else "red"
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: metric_card("Баланс", f"${equity:.2f}", "blue")
+        with c2: metric_card("P&L", f"${pnl:.2f}", color)
+        with c3: metric_card("ROI", f"{pnl_pct:.2f}%", color)
+        with c4:
+            dd = live_state.get("safety", {}).get("current_drawdown", 0) * 100
+            metric_card("Просадка", f"{dd:.1f}%", "red" if dd > 5 else "amber")
+
+        # AI сигнал
+        ai_state = live_state.get("ai_state", {})
+        ai_signal = ai_state.get("signal", 0)
+        ai_acc = ai_state.get("accuracy", 0.5)
+
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            trades = live_state.get("trade_history", [])
+            metric_card("Сделок", str(len(trades)), "blue")
+        with c6:
+            bought = live_state.get("grid", {}).get("bought_levels", {})
+            metric_card("Позиций", str(len(bought)), "amber")
+        with c7:
+            sig_text = "📈" if ai_signal > 0.2 else ("📉" if ai_signal < -0.2 else "↔️")
+            metric_card("AI сигнал", f"{sig_text} {ai_signal:.2f}", "blue")
+        with c8:
+            metric_card("AI точность", f"{ai_acc*100:.0f}%", "green" if ai_acc > 0.5 else "red")
+
+        # Equity curve
+        curve = live_state.get("equity_curve", [])
+        if curve:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=[p["t"] for p in curve],
+                y=[p["e"] for p in curve],
+                mode="lines", name="Баланс",
+                line=dict(color="#00e676", width=2),
+                fill="tozeroy", fillcolor="rgba(0,230,118,0.05)",
+            ))
+            fig.add_hline(y=investment, line_dash="dot", line_color="rgba(255,255,255,0.2)",
+                         annotation_text="Старт")
+            fig.update_layout(template="plotly_dark", height=300,
+                            margin=dict(l=0, r=0, t=30, b=0),
+                            yaxis_title="Баланс ($)",
+                            title=dict(text="Live баланс", font_size=14))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Последние сделки
+        if trades:
+            with st.expander(f"📋 Последние сделки ({len(trades)})", expanded=True):
+                recent = trades[-10:][::-1]
+                for t in recent:
+                    side_emoji = "🟢" if t["side"] == "buy" else "🔴"
+                    profit_str = f" | P&L: ${t.get('profit', 0):.2f}" if t["side"] == "sell" else ""
+                    st.write(f"{side_emoji} **{t['side'].upper()}** {t.get('amount', 0):.6f} "
+                            f"@ ${t['price']:.2f}{profit_str} — {t['timestamp'][:16]}")
+
+        # Управление
+        st.divider()
+        cmd_col1, cmd_col2, cmd_col3 = st.columns(3)
+        cmd_path = os.path.join(DATA_DIR, "live_commands.json")
+
+        with cmd_col1:
+            if st.button("⏸️ Пауза", use_container_width=True):
+                with open(cmd_path, "w") as f:
+                    _json.dump({"command": "pause"}, f)
+                st.toast("Команда отправлена: пауза")
+        with cmd_col2:
+            if st.button("▶️ Продолжить", use_container_width=True):
+                with open(cmd_path, "w") as f:
+                    _json.dump({"command": "resume"}, f)
+                st.toast("Команда отправлена: продолжить")
+        with cmd_col3:
+            if st.button("⏹️ Стоп", type="primary", use_container_width=True):
+                with open(cmd_path, "w") as f:
+                    _json.dump({"command": "stop"}, f)
+                st.toast("Команда отправлена: стоп")
+
+        # Обновлённое время
+        updated = live_state.get("updated_at", "")
+        st.caption(f"Обновлено: {updated[:19]}")
