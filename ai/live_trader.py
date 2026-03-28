@@ -28,15 +28,21 @@ from ai.live_config import LiveConfig
 from ai.safety import SafetyGuard
 from ai.feature_engineer import add_indicators, FEATURE_COLUMNS
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("data/live_trader.log", encoding="utf-8"),
-    ],
-)
 logger = logging.getLogger("LiveTrader")
+
+
+def setup_logging(symbol: str = "BTC_USDT"):
+    """Настройка логирования с уникальным файлом для каждой пары."""
+    safe = symbol.replace("/", "_")
+    os.makedirs("data", exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(f"data/live_trader_{safe}.log", encoding="utf-8"),
+        ],
+    )
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -596,7 +602,20 @@ class LiveGridTrader:
 
 def main():
     """Точка входа."""
-    config = LiveConfig.load()
+    import argparse
+    parser = argparse.ArgumentParser(description="Live Grid Trading Bot")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Путь к файлу конфигурации (по умолчанию data/live_config.json)")
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Торговая пара (например ETH/USDT)")
+    args = parser.parse_args()
+
+    config = LiveConfig.load(args.config)
+
+    if args.symbol:
+        config.symbol = args.symbol
+
+    setup_logging(config.symbol)
 
     if not config.api_key or not config.api_secret:
         print("❌ Установите переменные окружения:")
