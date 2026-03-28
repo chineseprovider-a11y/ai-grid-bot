@@ -130,7 +130,7 @@ class GridBacktest:
             max_drawdown=round(max_dd, 4),
             sharpe_ratio=round(sharpe, 4),
             investment=self.investment,
-            roi_pct=round(net_profit / self.investment * 100, 2),
+            roi_pct=round(real_net_profit / self.investment * 100, 2),
             trades=trades,
             equity_curve=equity,
         )
@@ -329,7 +329,7 @@ class AIGridBacktest(GridBacktest):
             max_drawdown=round(max_dd, 4),
             sharpe_ratio=round(sharpe, 4),
             investment=self.investment,
-            roi_pct=round(net_profit / self.investment * 100, 2),
+            roi_pct=round(real_net_profit / self.investment * 100, 2),
             trades=trades,
             equity_curve=equity,
         )
