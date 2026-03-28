@@ -74,6 +74,26 @@ class LiveGridTrader:
         else:
             logger.warning("⚠️ РЕАЛЬНАЯ ТОРГОВЛЯ — будут использованы настоящие деньги!")
 
+        # Загружаем информацию о рынках (для округления)
+        self.market_info = {}
+        try:
+            self.exchange.load_markets()
+            if config.symbol in self.exchange.markets:
+                m = self.exchange.markets[config.symbol]
+                self.market_info = {
+                    "amount_precision": m.get("precision", {}).get("amount", 8),
+                    "price_precision": m.get("precision", {}).get("price", 2),
+                    "min_amount": m.get("limits", {}).get("amount", {}).get("min", 0),
+                    "min_cost": m.get("limits", {}).get("cost", {}).get("min", 0),
+                }
+                logger.info("📊 %s: amount_prec=%s, price_prec=%s, min_amount=%s, min_cost=%s",
+                           config.symbol, self.market_info["amount_precision"],
+                           self.market_info["price_precision"],
+                           self.market_info["min_amount"],
+                           self.market_info["min_cost"])
+        except Exception as e:
+            logger.warning("Не удалось загрузить рынки: %s", e)
+
         # Безопасность
         self.safety = SafetyGuard(config.safety)
 
@@ -419,9 +439,46 @@ class LiveGridTrader:
     # Ордера
     # ═══════════════════════════════════════════
 
+    def _round_amount(self, amount: float) -> float:
+        """Округляет количество по правилам биржи."""
+        precision = self.market_info.get("amount_precision", 8)
+        if isinstance(precision, int):
+            return float(self.exchange.decimal_to_precision(
+                amount, 1, precision, 2))  # TRUNCATE, DECIMAL_PLACES
+        return round(amount, 8)
+
+    def _round_price(self, price: float) -> float:
+        """Округляет цену по правилам биржи."""
+        precision = self.market_info.get("price_precision", 2)
+        if isinstance(precision, int):
+            return float(self.exchange.decimal_to_precision(
+                price, 1, precision, 2))
+        return round(price, 2)
+
     def _place_order(self, side: str, price: float, amount: float, level: float) -> dict:
         """Размещает лимитный ордер на бирже."""
         try:
+            # Округляем по правилам биржи
+            amount = self._round_amount(amount)
+            price = self._round_price(price)
+
+            # Проверяем минимумы
+            min_amount = self.market_info.get("min_amount", 0)
+            min_cost = self.market_info.get("min_cost", 0)
+
+            if min_amount and amount < min_amount:
+                logger.warning("⚠️ Количество %.8f < мин %.8f для %s",
+                             amount, min_amount, self.config.symbol)
+                return None
+
+            if min_cost and (amount * price) < min_cost:
+                logger.warning("⚠️ Стоимость $%.2f < мин $%.2f для %s",
+                             amount * price, min_cost, self.config.symbol)
+                return None
+
+            if amount <= 0:
+                return None
+
             if side == "buy":
                 order = self.exchange.create_limit_buy_order(
                     self.config.symbol, amount, price
@@ -431,13 +488,13 @@ class LiveGridTrader:
                     self.config.symbol, amount, price
                 )
 
-            logger.info("📋 %s ордер: %.6f %s @ %.2f (ID: %s)",
+            logger.info("📋 %s ордер: %.8f %s @ %.2f (ID: %s)",
                        side.upper(), amount, self.config.symbol, price,
                        order.get("id", "?"))
             return order
 
         except ccxt.InsufficientFunds:
-            logger.warning("💰 Недостаточно средств для %s %.6f @ %.2f", side, amount, price)
+            logger.warning("💰 Недостаточно средств для %s %.8f @ %.2f", side, amount, price)
             return None
         except ccxt.InvalidOrder as e:
             logger.warning("❌ Невалидный ордер: %s", e)
