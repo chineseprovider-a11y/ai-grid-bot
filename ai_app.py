@@ -8,6 +8,13 @@ from plotly.subplots import make_subplots
 import ccxt
 import os
 
+# Проверяем наличие TensorFlow (опционально для Streamlit Cloud)
+try:
+    import tensorflow as tf
+    HAS_TF = True
+except ImportError:
+    HAS_TF = False
+
 st.set_page_config(page_title="AI Grid Bot", page_icon="⚡", layout="wide")
 
 # ─── Стили ───
@@ -271,10 +278,10 @@ with tab_start:
             epochs = 15 if "15" in speed else 50
 
         if st.button("🧠 Обучить", type="primary", use_container_width=True, key="btn_train"):
-            try:
-                import tensorflow as tf
-            except ImportError:
-                st.error("TensorFlow не установлен! Выполните: `pip install tensorflow`")
+            if not HAS_TF:
+                st.error("⚠️ TensorFlow не доступен на Streamlit Cloud (лимит памяти).\n\n"
+                         "Обучите модели локально: `pip install tensorflow-cpu` → `python -m ai.train`\n\n"
+                         "Или используйте `train_colab.ipynb` в Google Colab.")
                 st.stop()
 
             from ai.feature_engineer import prepare_training_data, FEATURE_COLUMNS
@@ -392,6 +399,9 @@ with tab_backtest:
                 results["grid"] = grid_bt.run(df, bt_symbol)
 
         if run_ai:
+            if not HAS_TF:
+                st.error("⚠️ AI Grid недоступен — TensorFlow не установлен. Используйте «Только Grid».")
+                st.stop()
             from ai.model import load_model
             model, scaler = load_model(bt_symbol)
             with st.spinner("Тестирую AI Grid..."):
@@ -476,6 +486,9 @@ with tab_optimize:
 
         model, scaler = None, None
         if opt_use_ai:
+            if not HAS_TF:
+                st.error("⚠️ AI недоступен — TensorFlow не установлен.")
+                st.stop()
             from ai.model import load_model
             model, scaler = load_model(opt_symbol)
             if model is None:
@@ -566,6 +579,11 @@ with tab_live:
     live_symbol = st.selectbox("Пара", available_models, key="live_sym")
 
     if st.button("🔮 Получить прогноз", type="primary", use_container_width=True, key="btn_live"):
+        if not HAS_TF:
+            st.error("⚠️ TensorFlow не доступен на Streamlit Cloud.\n\n"
+                     "Прогнозы работают только при локальном запуске с TensorFlow.")
+            st.stop()
+
         model_path = os.path.join(MODEL_DIR, f"{live_symbol.replace('/', '_')}_lstm.keras")
         if not os.path.exists(model_path):
             st.error("Модель не найдена!")
