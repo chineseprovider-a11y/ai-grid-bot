@@ -697,100 +697,158 @@ with tab_trading:
         ⚠️ **Начните с Testnet** — торговля фейковыми деньгами на реальном рынке.
         """)
     else:
-        # Загружаем состояние
-        state_path = state_files[0]
-        with open(state_path) as f:
-            live_state = _json.load(f)
+        # Загружаем ВСЕ state-файлы
+        all_states = []
+        for sp in sorted(state_files):
+            try:
+                with open(sp) as f:
+                    all_states.append(_json.load(f))
+            except Exception:
+                pass
 
-        status = live_state.get("status", "unknown")
-        symbol = live_state.get("symbol", "?")
-        equity = live_state.get("current_equity", 0)
-        investment = live_state.get("initial_investment", 0)
-        pnl = equity - investment
-        pnl_pct = (pnl / investment * 100) if investment > 0 else 0
+        if not all_states:
+            st.info("Нет данных о торговле")
+        else:
+            # ═══ Общая сводка по всем парам ═══
+            total_equity = sum(s.get("current_equity", 0) for s in all_states)
+            total_investment = sum(s.get("initial_investment", 0) for s in all_states)
+            total_pnl = total_equity - total_investment
+            total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
+            total_trades = sum(len(s.get("trade_history", [])) for s in all_states)
+            total_positions = sum(len(s.get("grid", {}).get("bought_levels", {})) for s in all_states)
+            running_count = sum(1 for s in all_states if s.get("status") == "running")
 
-        # Статус
-        status_emoji = {"running": "🟢", "paused": "⏸️", "stopped": "⏹️", "error": "🔴"}
-        st.markdown(f"### {status_emoji.get(status, '❓')} {symbol} — {status.upper()}")
+            st.markdown(f"### Портфель: {len(all_states)} пар ({running_count} активных)")
 
-        # Метрики
-        color = "green" if pnl >= 0 else "red"
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: metric_card("Баланс", f"${equity:.2f}", "blue")
-        with c2: metric_card("P&L", f"${pnl:.2f}", color)
-        with c3: metric_card("ROI", f"{pnl_pct:.2f}%", color)
-        with c4:
-            dd = live_state.get("safety", {}).get("current_drawdown", 0) * 100
-            metric_card("Просадка", f"{dd:.1f}%", "red" if dd > 5 else "amber")
+            color = "green" if total_pnl >= 0 else "red"
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: metric_card("Общий баланс", f"${total_equity:.2f}", "blue")
+            with c2: metric_card("Общий P&L", f"${total_pnl:.2f}", color)
+            with c3: metric_card("ROI", f"{total_pnl_pct:.2f}%", color)
+            with c4: metric_card("Сделок / Позиций", f"{total_trades} / {total_positions}", "amber")
 
-        # AI сигнал
-        ai_state = live_state.get("ai_state", {})
-        ai_signal = ai_state.get("signal", 0)
-        ai_acc = ai_state.get("accuracy", 0.5)
+            st.divider()
 
-        c5, c6, c7, c8 = st.columns(4)
-        with c5:
-            trades = live_state.get("trade_history", [])
-            metric_card("Сделок", str(len(trades)), "blue")
-        with c6:
-            bought = live_state.get("grid", {}).get("bought_levels", {})
-            metric_card("Позиций", str(len(bought)), "amber")
-        with c7:
-            sig_text = "📈" if ai_signal > 0.2 else ("📉" if ai_signal < -0.2 else "↔️")
-            metric_card("AI сигнал", f"{sig_text} {ai_signal:.2f}", "blue")
-        with c8:
-            metric_card("AI точность", f"{ai_acc*100:.0f}%", "green" if ai_acc > 0.5 else "red")
+            # ═══ Карточки по каждой паре ═══
+            # По 3 пары в ряд
+            for row_start in range(0, len(all_states), 3):
+                row_states = all_states[row_start:row_start + 3]
+                cols = st.columns(len(row_states))
 
-        # Equity curve
-        curve = live_state.get("equity_curve", [])
-        if curve:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=[p["t"] for p in curve],
-                y=[p["e"] for p in curve],
-                mode="lines", name="Баланс",
-                line=dict(color="#00e676", width=2),
-                fill="tozeroy", fillcolor="rgba(0,230,118,0.05)",
-            ))
-            fig.add_hline(y=investment, line_dash="dot", line_color="rgba(255,255,255,0.2)",
-                         annotation_text="Старт")
-            fig.update_layout(template="plotly_dark", height=300,
-                            margin=dict(l=0, r=0, t=30, b=0),
-                            yaxis_title="Баланс ($)",
-                            title=dict(text="Live баланс", font_size=14))
-            st.plotly_chart(fig, use_container_width=True)
+                for col, live_state in zip(cols, row_states):
+                    with col:
+                        status = live_state.get("status", "unknown")
+                        symbol = live_state.get("symbol", "?")
+                        equity = live_state.get("current_equity", 0)
+                        investment = live_state.get("initial_investment", 0)
+                        pnl = equity - investment
+                        pnl_pct = (pnl / investment * 100) if investment > 0 else 0
 
-        # Последние сделки
-        if trades:
-            with st.expander(f"📋 Последние сделки ({len(trades)})", expanded=True):
-                recent = trades[-10:][::-1]
-                for t in recent:
-                    side_emoji = "🟢" if t["side"] == "buy" else "🔴"
-                    profit_str = f" | P&L: ${t.get('profit', 0):.2f}" if t["side"] == "sell" else ""
-                    st.write(f"{side_emoji} **{t['side'].upper()}** {t.get('amount', 0):.6f} "
-                            f"@ ${t['price']:.2f}{profit_str} — {t['timestamp'][:16]}")
+                        status_emoji = {"running": "🟢", "paused": "⏸️", "stopped": "⏹️", "error": "🔴"}
+                        pnl_color = "🟩" if pnl >= 0 else "🟥"
 
-        # Управление
-        st.divider()
-        cmd_col1, cmd_col2, cmd_col3 = st.columns(3)
-        cmd_path = os.path.join(DATA_DIR, "live_commands.json")
+                        st.markdown(f"**{status_emoji.get(status, '❓')} {symbol}**")
+                        st.markdown(f"Баланс: **${equity:.2f}** | P&L: **${pnl:.2f}** ({pnl_pct:+.1f}%)")
 
-        with cmd_col1:
-            if st.button("⏸️ Пауза", use_container_width=True):
-                with open(cmd_path, "w") as f:
-                    _json.dump({"command": "pause"}, f)
-                st.toast("Команда отправлена: пауза")
-        with cmd_col2:
-            if st.button("▶️ Продолжить", use_container_width=True):
-                with open(cmd_path, "w") as f:
-                    _json.dump({"command": "resume"}, f)
-                st.toast("Команда отправлена: продолжить")
-        with cmd_col3:
-            if st.button("⏹️ Стоп", type="primary", use_container_width=True):
-                with open(cmd_path, "w") as f:
-                    _json.dump({"command": "stop"}, f)
-                st.toast("Команда отправлена: стоп")
+                        # AI сигнал
+                        ai_state = live_state.get("ai_state", {})
+                        ai_signal = ai_state.get("signal", 0)
+                        sig_text = "📈" if ai_signal > 0.2 else ("📉" if ai_signal < -0.2 else "↔️")
+                        trades = live_state.get("trade_history", [])
+                        bought = live_state.get("grid", {}).get("bought_levels", {})
+                        st.caption(f"AI: {sig_text} {ai_signal:.2f} | Сделок: {len(trades)} | Позиций: {len(bought)}")
 
-        # Обновлённое время
-        updated = live_state.get("updated_at", "")
-        st.caption(f"Обновлено: {updated[:19]}")
+            # ═══ Выбор пары для детального просмотра ═══
+            st.divider()
+            symbol_list = [s.get("symbol", "?") for s in all_states]
+            selected = st.selectbox("Детали пары:", symbol_list, key="live_pair_select")
+            live_state = next((s for s in all_states if s.get("symbol") == selected), all_states[0])
+
+            status = live_state.get("status", "unknown")
+            symbol = live_state.get("symbol", "?")
+            equity = live_state.get("current_equity", 0)
+            investment = live_state.get("initial_investment", 0)
+            pnl = equity - investment
+            pnl_pct = (pnl / investment * 100) if investment > 0 else 0
+
+            status_emoji = {"running": "🟢", "paused": "⏸️", "stopped": "⏹️", "error": "🔴"}
+            st.markdown(f"#### {status_emoji.get(status, '❓')} {symbol} — {status.upper()}")
+
+            color = "green" if pnl >= 0 else "red"
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: metric_card("Баланс", f"${equity:.2f}", "blue")
+            with c2: metric_card("P&L", f"${pnl:.2f}", color)
+            with c3: metric_card("ROI", f"{pnl_pct:.2f}%", color)
+            with c4:
+                dd = live_state.get("safety", {}).get("current_drawdown", 0) * 100
+                metric_card("Просадка", f"{dd:.1f}%", "red" if dd > 5 else "amber")
+
+            ai_state = live_state.get("ai_state", {})
+            ai_signal = ai_state.get("signal", 0)
+            ai_acc = ai_state.get("accuracy", 0.5)
+
+            c5, c6, c7, c8 = st.columns(4)
+            with c5:
+                trades = live_state.get("trade_history", [])
+                metric_card("Сделок", str(len(trades)), "blue")
+            with c6:
+                bought = live_state.get("grid", {}).get("bought_levels", {})
+                metric_card("Позиций", str(len(bought)), "amber")
+            with c7:
+                sig_text = "📈" if ai_signal > 0.2 else ("📉" if ai_signal < -0.2 else "↔️")
+                metric_card("AI сигнал", f"{sig_text} {ai_signal:.2f}", "blue")
+            with c8:
+                metric_card("AI точность", f"{ai_acc*100:.0f}%", "green" if ai_acc > 0.5 else "red")
+
+            # Equity curve
+            curve = live_state.get("equity_curve", [])
+            if curve:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=[p["t"] for p in curve],
+                    y=[p["e"] for p in curve],
+                    mode="lines", name="Баланс",
+                    line=dict(color="#00e676", width=2),
+                    fill="tozeroy", fillcolor="rgba(0,230,118,0.05)",
+                ))
+                fig.add_hline(y=investment, line_dash="dot", line_color="rgba(255,255,255,0.2)",
+                             annotation_text="Старт")
+                fig.update_layout(template="plotly_dark", height=300,
+                                margin=dict(l=0, r=0, t=30, b=0),
+                                yaxis_title="Баланс ($)",
+                                title=dict(text=f"Live баланс — {symbol}", font_size=14))
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Последние сделки
+            if trades:
+                with st.expander(f"Последние сделки ({len(trades)})", expanded=True):
+                    recent = trades[-10:][::-1]
+                    for t in recent:
+                        side_emoji = "🟢" if t["side"] == "buy" else "🔴"
+                        profit_str = f" | P&L: ${t.get('profit', 0):.2f}" if t["side"] == "sell" else ""
+                        st.write(f"{side_emoji} **{t['side'].upper()}** {t.get('amount', 0):.6f} "
+                                f"@ ${t['price']:.2f}{profit_str} — {t['timestamp'][:16]}")
+
+            # Управление
+            st.divider()
+            cmd_col1, cmd_col2, cmd_col3 = st.columns(3)
+            cmd_path = os.path.join(DATA_DIR, "live_commands.json")
+
+            with cmd_col1:
+                if st.button("⏸️ Пауза", use_container_width=True):
+                    with open(cmd_path, "w") as f:
+                        _json.dump({"command": "pause"}, f)
+                    st.toast("Команда отправлена: пауза")
+            with cmd_col2:
+                if st.button("▶️ Продолжить", use_container_width=True):
+                    with open(cmd_path, "w") as f:
+                        _json.dump({"command": "resume"}, f)
+                    st.toast("Команда отправлена: продолжить")
+            with cmd_col3:
+                if st.button("⏹️ Стоп", type="primary", use_container_width=True):
+                    with open(cmd_path, "w") as f:
+                        _json.dump({"command": "stop"}, f)
+                    st.toast("Команда отправлена: стоп")
+
+            updated = live_state.get("updated_at", "")
+            st.caption(f"Обновлено: {updated[:19]}")
