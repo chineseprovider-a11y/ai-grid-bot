@@ -537,15 +537,17 @@ class LiveGridTrader:
                     self.config.poll_interval_seconds)
         logger.info("=" * 50)
 
-        # Обработка сигналов завершения
-        def handle_signal(sig, frame):
-            logger.info("📛 Получен сигнал завершения — сохраняю состояние...")
-            self.state["status"] = "stopped"
-            self.save_state()
-            sys.exit(0)
+        # Обработка сигналов завершения (только в main thread)
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            def handle_signal(sig, frame):
+                logger.info("📛 Получен сигнал завершения — сохраняю состояние...")
+                self.state["status"] = "stopped"
+                self.save_state()
+                sys.exit(0)
 
-        signal.signal(signal.SIGINT, handle_signal)
-        signal.signal(signal.SIGTERM, handle_signal)
+            signal.signal(signal.SIGINT, handle_signal)
+            signal.signal(signal.SIGTERM, handle_signal)
 
         # Основной цикл
         retry_delay = 1
