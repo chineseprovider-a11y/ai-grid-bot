@@ -6,3 +6,4 @@ ccxt
 ta
 scikit-learn
 joblib
+tensorflow-cpu

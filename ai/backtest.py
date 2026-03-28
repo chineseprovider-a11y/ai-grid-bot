@@ -89,7 +89,8 @@ class GridBacktest:
                     pos = holdings.pop(lvl)
                     sell_value = pos["amount"] * price
                     fee = sell_value * self.fee_rate
-                    profit = sell_value - (pos["amount"] * pos["buy_price"]) - fee * 2
+                    buy_cost = pos["amount"] * pos["buy_price"]
+                    profit = sell_value - buy_cost - fee - (buy_cost * self.fee_rate)
                     balance += sell_value
                     total_fees += fee
                     total_profit += profit
@@ -155,7 +156,15 @@ class GridBacktest:
 
 
 class AIGridBacktest(GridBacktest):
-    """Grid + AI бот — использует предсказания модели для оптимизации сетки."""
+    """
+    Grid + AI бот v2 — AI работает как умный фильтр поверх стандартного Grid.
+
+    Принципы:
+    1. Сетка НИКОГДА не перестраивается из-за AI (только при выходе цены за диапазон)
+    2. AI только ФИЛЬТРУЕТ сделки: пропускает плохие покупки, задерживает продажи
+    3. Размер позиций одинаковый — без множителей
+    4. Используем скользящее среднее предсказаний для устойчивости
+    """
 
     def __init__(self, investment: float, grid_count: int, range_pct: float = 2.0,
                  fee_rate: float = 0.00075, model=None, scaler=None, seq_length: int = 48):
@@ -165,8 +174,8 @@ class AIGridBacktest(GridBacktest):
         self.seq_length = seq_length
 
     def run(self, df: pd.DataFrame, symbol: str) -> BacktestResult:
-        # Добавляем индикаторы
-        df = add_indicators(df).dropna().reset_index(drop=True)
+        # Добавляем индикаторы для AI предсказаний
+        df_ai = add_indicators(df.copy()).dropna().reset_index(drop=True)
 
         trades = []
         equity = []
@@ -175,70 +184,116 @@ class AIGridBacktest(GridBacktest):
         total_fees = 0.0
         total_profit = 0.0
 
-        start_price = df["close"].iloc[self.seq_length]
+        # Стандартная сетка — как в обычном Grid
+        start_price = df_ai["close"].iloc[self.seq_length]
         lower, upper, levels = self._setup_grid(start_price)
         order_size = self.investment / self.grid_count
         bought_levels = set()
+
+        # AI состояние — скользящее среднее предсказаний
+        prediction_history = []  # хранит последние предсказания
         last_prediction_i = 0
-        current_direction = "sideways"
-        current_confidence = 0.5
+        ai_signal = 0.0  # -1.0 (bearish) .. 0.0 (neutral) .. +1.0 (bullish)
 
-        for i in range(self.seq_length, len(df)):
-            price = df["close"].iloc[i]
-            ts = str(df["timestamp"].iloc[i])
+        # Статистика точности AI для самокалибровки
+        ai_correct = 0
+        ai_total = 0
+        ai_accuracy = 0.5  # начинаем с нейтральной
 
-            # AI предсказание каждые 6 часов
-            if self.model and (i - last_prediction_i) >= 6:
-                prediction = self._predict(df, i)
+        for i in range(self.seq_length, len(df_ai)):
+            price = df_ai["close"].iloc[i]
+            ts = str(df_ai["timestamp"].iloc[i])
+
+            # AI предсказание каждые 12 часов (реже = стабильнее)
+            if self.model and (i - last_prediction_i) >= 12:
+                prediction = self._predict(df_ai, i)
                 if prediction:
-                    current_direction = prediction["direction"]
-                    current_confidence = prediction["confidence"]
+                    # Проверяем предыдущее предсказание (самокалибровка)
+                    if prediction_history and last_prediction_i > 0:
+                        prev_pred = prediction_history[-1]
+                        prev_price = df_ai["close"].iloc[last_prediction_i]
+                        actual_return = (price - prev_price) / prev_price
+
+                        was_correct = False
+                        if prev_pred > 0.2 and actual_return > 0:
+                            was_correct = True
+                        elif prev_pred < -0.2 and actual_return < 0:
+                            was_correct = True
+                        elif abs(prev_pred) <= 0.2 and abs(actual_return) < 0.005:
+                            was_correct = True
+
+                        ai_total += 1
+                        if was_correct:
+                            ai_correct += 1
+                        ai_accuracy = ai_correct / ai_total if ai_total > 0 else 0.5
+
+                    # Конвертируем вероятности в непрерывный сигнал [-1, +1]
+                    probs = prediction["probabilities"]
+                    raw_signal = probs["bullish"] - probs["bearish"]
+
+                    # Скользящее среднее сигнала (сглаживание шума)
+                    prediction_history.append(raw_signal)
+                    if len(prediction_history) > 5:
+                        prediction_history.pop(0)
+
+                    # Взвешенное среднее: последние предсказания важнее
+                    weights = list(range(1, len(prediction_history) + 1))
+                    ai_signal = sum(s * w for s, w in zip(prediction_history, weights)) / sum(weights)
+
+                    # Снижаем влияние AI если он часто ошибается
+                    if ai_accuracy < 0.4:
+                        ai_signal *= 0.3  # AI плохо работает — почти игнорируем
+                    elif ai_accuracy < 0.5:
+                        ai_signal *= 0.6  # AI неуверенный — частично игнорируем
+
                     last_prediction_i = i
 
-                    # AI адаптация сетки
-                    lower, upper, levels = self._ai_adjust_grid(
-                        price, current_direction, current_confidence
-                    )
-                    # Не очищаем bought_levels — сохраняем позиции
-
-            # Цена вышла за диапазон
+            # Цена вышла за диапазон — стандартная перенастройка
             if price < lower or price > upper:
-                lower, upper, levels = self._ai_adjust_grid(
-                    price, current_direction, current_confidence
-                )
+                lower, upper, levels = self._setup_grid(price)
                 bought_levels.clear()
                 continue
 
-            # Торговая логика с AI-фильтром
+            # Торговля с AI-фильтром
             for lvl in levels:
-                # BUY: AI говорит sideways или bullish — покупаем
-                if (price <= lvl and lvl not in bought_levels and balance >= order_size):
-                    # AI-фильтр: не покупаем при сильном bearish сигнале
-                    if current_direction == "bearish" and current_confidence > 0.7:
-                        continue
+                # ═══ BUY FILTER ═══
+                if price <= lvl and lvl not in bought_levels and balance >= order_size:
+                    # AI фильтр: пропускаем покупку только при СИЛЬНОМ bearish сигнале
+                    if ai_signal < -0.4:
+                        continue  # сильный bearish — не покупаем
 
-                    # При bullish — увеличиваем позицию
-                    multiplier = 1.0
-                    if current_direction == "bullish" and current_confidence > 0.6:
-                        multiplier = 1.3
-                    elif current_direction == "bearish":
-                        multiplier = 0.7
+                    # RSI фильтр: не покупаем при перекупленности
+                    rsi = df_ai["rsi"].iloc[i] if "rsi" in df_ai.columns else 50
+                    if rsi > 75 and ai_signal < 0:
+                        continue  # перекуплено + bearish — пропускаем
 
-                    actual_size = min(order_size * multiplier, balance)
-                    amount = actual_size / price
-                    fee = actual_size * self.fee_rate
-                    balance -= actual_size
+                    amount = order_size / price
+                    fee = order_size * self.fee_rate
+                    balance -= order_size
                     total_fees += fee
                     bought_levels.add(lvl)
-                    holdings[lvl] = {"amount": amount, "buy_price": price}
+                    holdings[lvl] = {"amount": amount, "buy_price": price, "buy_i": i}
                     trades.append(Trade(ts, "buy", price, amount, fee))
 
-                # SELL
+                # ═══ SELL FILTER ═══
                 elif price >= lvl and lvl in bought_levels and lvl in holdings:
+                    pos = holdings[lvl]
+                    hold_duration = i - pos.get("buy_i", i)
+
+                    # AI фильтр продажи: задерживаем продажу при СИЛЬНОМ bullish
+                    if ai_signal > 0.5 and hold_duration < 24:
+                        # Сильный bullish сигнал + держим < 24ч → подождём
+                        # Но продаём если цена выросла достаточно (> 1% от покупки)
+                        price_gain = (price - pos["buy_price"]) / pos["buy_price"]
+                        if price_gain < 0.01:
+                            continue  # подождём ещё
+
+                    # Стандартная продажа
                     pos = holdings.pop(lvl)
                     sell_value = pos["amount"] * price
                     fee = sell_value * self.fee_rate
-                    profit = sell_value - (pos["amount"] * pos["buy_price"]) - fee * 2
+                    buy_cost = pos["amount"] * pos["buy_price"]
+                    profit = sell_value - buy_cost - fee - (buy_cost * self.fee_rate)
                     balance += sell_value
                     total_fees += fee
                     total_profit += profit
@@ -282,35 +337,15 @@ class AIGridBacktest(GridBacktest):
             scaled = self.scaler.transform(features)
             X = np.expand_dims(scaled, axis=0)
             probs = self.model.predict(X, verbose=0)[0]
-            direction_idx = int(np.argmax(probs))
-            directions = ["bearish", "sideways", "bullish"]
             return {
-                "direction": directions[direction_idx],
-                "confidence": float(probs[direction_idx]),
+                "probabilities": {
+                    "bearish": float(probs[0]),
+                    "sideways": float(probs[1]),
+                    "bullish": float(probs[2]),
+                },
             }
         except Exception:
             return None
-
-    def _ai_adjust_grid(self, price, direction, confidence):
-        """AI адаптирует параметры сетки в зависимости от предсказания."""
-        if direction == "bullish" and confidence > 0.6:
-            # Бычий тренд — сетка смещена вверх, шире
-            range_mult = 1.3
-            lower = price * (1 - self.range_pct / 100 * 0.7)
-            upper = price * (1 + self.range_pct / 100 * range_mult)
-        elif direction == "bearish" and confidence > 0.6:
-            # Медвежий тренд — сетка смещена вниз, уже
-            range_mult = 0.8
-            lower = price * (1 - self.range_pct / 100 * 1.3)
-            upper = price * (1 + self.range_pct / 100 * range_mult)
-        else:
-            # Боковик — симметричная сетка
-            lower = price * (1 - self.range_pct / 100)
-            upper = price * (1 + self.range_pct / 100)
-
-        step = (upper - lower) / self.grid_count
-        levels = [round(lower + i * step, 8) for i in range(1, self.grid_count)]
-        return lower, upper, levels
 
 
 @dataclass

@@ -11,21 +11,37 @@ MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
 
 
 def build_lstm_model(seq_length: int, n_features: int, n_classes: int = 3):
-    """Создаёт LSTM модель."""
+    """Создаёт улучшенную LSTM модель с регуляризацией."""
     import tensorflow as tf
     from tensorflow import keras
 
     model = keras.Sequential([
-        keras.layers.LSTM(64, return_sequences=True, input_shape=(seq_length, n_features)),
+        # LSTM слой 1 с L2 регуляризацией
+        keras.layers.LSTM(
+            48, return_sequences=True,
+            input_shape=(seq_length, n_features),
+            kernel_regularizer=keras.regularizers.l2(0.001),
+        ),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(0.3),
+
+        # LSTM слой 2
+        keras.layers.LSTM(
+            24, return_sequences=False,
+            kernel_regularizer=keras.regularizers.l2(0.001),
+        ),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(0.3),
+
+        # Dense слои
+        keras.layers.Dense(16, activation="relu",
+                          kernel_regularizer=keras.regularizers.l2(0.001)),
         keras.layers.Dropout(0.2),
-        keras.layers.LSTM(32, return_sequences=False),
-        keras.layers.Dropout(0.2),
-        keras.layers.Dense(16, activation="relu"),
         keras.layers.Dense(n_classes, activation="softmax"),
     ])
 
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        optimizer=keras.optimizers.Adam(learning_rate=0.0005),
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy"],
     )
@@ -33,8 +49,15 @@ def build_lstm_model(seq_length: int, n_features: int, n_classes: int = 3):
 
 
 def train_model(model, X_train, y_train, X_val, y_val, epochs: int = 50, batch_size: int = 32):
-    """Обучает модель с ранней остановкой."""
+    """Обучает модель с ранней остановкой и class weights."""
     from tensorflow import keras
+
+    # Автоматический подсчёт весов классов (борьба с дисбалансом)
+    unique, counts = np.unique(y_train, return_counts=True)
+    total = len(y_train)
+    class_weight = {int(cls): total / (len(unique) * count)
+                    for cls, count in zip(unique, counts)}
+    logger.info("Class weights: %s", class_weight)
 
     callbacks = [
         keras.callbacks.EarlyStopping(
@@ -46,6 +69,7 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs: int = 50, batch_s
             monitor="val_loss",
             factor=0.5,
             patience=5,
+            min_lr=1e-6,
         ),
     ]
 
@@ -55,6 +79,7 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs: int = 50, batch_s
         epochs=epochs,
         batch_size=batch_size,
         callbacks=callbacks,
+        class_weight=class_weight,
         verbose=2,
     )
     return history

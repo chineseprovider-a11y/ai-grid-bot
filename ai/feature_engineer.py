@@ -49,6 +49,23 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["returns_6"] = df["close"].pct_change(6)
     df["returns_24"] = df["close"].pct_change(24)
 
+    # ─── Grid-специфичные индикаторы ───
+
+    # Mean-reversion: отклонение цены от SMA (ключевой для Grid)
+    sma_20 = df["close"].rolling(20).mean()
+    df["mean_reversion"] = (df["close"] - sma_20) / sma_20
+
+    # Волатильность за разные периоды (Grid лучше работает при высокой волатильности)
+    df["volatility_6h"] = df["returns_1"].rolling(6).std()
+    df["volatility_24h"] = df["returns_1"].rolling(24).std()
+    df["vol_regime"] = df["volatility_6h"] / df["volatility_24h"].replace(0, 1)
+
+    # Диапазон свечи (High-Low) / Close — насколько активно двигается цена
+    df["candle_range"] = (df["high"] - df["low"]) / df["close"]
+
+    # Направление тренда: наклон EMA
+    df["trend_slope"] = df["ema_20"].pct_change(6)
+
     return df
 
 
@@ -57,6 +74,8 @@ FEATURE_COLUMNS = [
     "bb_width", "bb_position", "atr_pct",
     "ema_cross", "stoch_k", "stoch_d",
     "volume_ratio", "returns_1", "returns_6", "returns_24",
+    "mean_reversion", "volatility_6h", "volatility_24h",
+    "vol_regime", "candle_range", "trend_slope",
 ]
 
 
