@@ -28,16 +28,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MultiTrader")
 
-# Пары для торговли
-DEFAULT_SYMBOLS = [
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
-    "BNB/USDT",
-    "DOGE/USDT",
-    "ADA/USDT",
-    "LINK/USDT",
-]
+# Пары и веса портфеля (больше вес = больше депозит)
+# Топ-монеты получают больше, рисковые — меньше
+DEFAULT_PORTFOLIO = {
+    "BTC/USDT":  30,   # 30% — основа портфеля
+    "ETH/USDT":  25,   # 25% — вторая по капитализации
+    "SOL/USDT":  12,   # 12% — быстрорастущий L1
+    "BNB/USDT":  12,   # 12% — экосистема Binance
+    "LINK/USDT": 10,   # 10% — лидер оракулов
+    "ADA/USDT":   6,   #  6% — средний риск
+    "DOGE/USDT":  5,   #  5% — высокий риск, мем
+}
+
+DEFAULT_SYMBOLS = list(DEFAULT_PORTFOLIO.keys())
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 MULTI_CONFIG_PATH = os.path.join(DATA_DIR, "multi_config.json")
@@ -58,15 +61,16 @@ def save_multi_config(config: dict):
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
-def run_trader(symbol: str, base_config: LiveConfig):
+def run_trader(symbol: str, base_config: LiveConfig, investment: float = None):
     """Запускает бота для одной пары (в потоке)."""
     try:
-        # Копируем конфиг и меняем пару
         import copy
         config = copy.deepcopy(base_config)
         config.symbol = symbol
+        if investment:
+            config.investment = investment
 
-        logger.info("🚀 Запуск бота для %s", symbol)
+        logger.info("🚀 Запуск бота для %s (депозит: $%.2f)", symbol, config.investment)
         trader = LiveGridTrader(config)
         trader.start()
     except Exception as e:
@@ -84,17 +88,19 @@ def main():
     args = parser.parse_args()
 
     base_config = LiveConfig.load()
+    total_investment = base_config.investment
 
-    # Определяем пары
+    # Определяем пары и веса
     multi_conf = load_multi_config()
-    symbols = args.symbols or multi_conf.get("symbols", DEFAULT_SYMBOLS)
+    portfolio = multi_conf.get("portfolio", DEFAULT_PORTFOLIO)
+    symbols = args.symbols or list(portfolio.keys())
 
-    # Депозит на каждую пару
-    per_pair_investment = args.investment or multi_conf.get(
-        "per_pair_investment",
-        base_config.investment / len(symbols)
-    )
-    base_config.investment = per_pair_investment
+    # Рассчитываем депозит для каждой пары по весам
+    total_weight = sum(portfolio.get(s, 10) for s in symbols)
+    allocations = {}
+    for symbol in symbols:
+        weight = portfolio.get(symbol, 10)
+        allocations[symbol] = round(total_investment * weight / total_weight, 2)
 
     if not base_config.api_key or not base_config.api_secret:
         print("❌ Установите переменные окружения:")
@@ -104,30 +110,34 @@ def main():
 
     # Сохраняем конфиг
     save_multi_config({
-        "symbols": symbols,
-        "per_pair_investment": per_pair_investment,
+        "portfolio": portfolio,
+        "total_investment": total_investment,
+        "allocations": allocations,
         "started_at": datetime.now(timezone.utc).isoformat(),
     })
 
     logger.info("=" * 60)
     logger.info("🚀 МУЛЬТИПАРНЫЙ БОТ")
-    logger.info("   Пар: %d | Депозит на пару: $%.2f", len(symbols), per_pair_investment)
-    logger.info("   Пары: %s", ", ".join(symbols))
+    logger.info("   Общий депозит: $%.2f | Пар: %d", total_investment, len(symbols))
+    for sym, alloc in allocations.items():
+        weight = portfolio.get(sym, 10)
+        logger.info("   %s: $%.2f (%d%%)", sym, alloc, weight)
     logger.info("   Testnet: %s | AI: %s", base_config.testnet, base_config.use_ai)
     logger.info("=" * 60)
 
     # Запускаем потоки
     threads = []
     for symbol in symbols:
+        investment = allocations[symbol]
         t = threading.Thread(
             target=run_trader,
-            args=(symbol, base_config),
+            args=(symbol, base_config, investment),
             name=f"bot-{symbol.replace('/', '-')}",
             daemon=True,
         )
         t.start()
         threads.append(t)
-        logger.info("✅ Поток запущен: %s", symbol)
+        logger.info("✅ Поток запущен: %s ($%.2f)", symbol, investment)
 
     # Ждём завершения
     def handle_signal(sig, frame):
