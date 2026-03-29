@@ -210,36 +210,43 @@ class LiveGridTrader:
     # Сетка
     # ═══════════════════════════════════════════
 
-    def setup_grid(self, price: float, ai_signal: float = 0.0):
+    def setup_grid(self, price: float, ai_signal: float = 0.0, keep_positions: bool = False):
         """
         Настраивает сетку уровней вокруг текущей цены.
         AI влияет на:
-        1. Динамический диапазон — bullish сужает (меньше риск), bearish расширяет
-        2. Смещение центра — bullish сдвигает вверх (больше уровней для продажи)
+        1. Динамический диапазон — bullish сужает, bearish расширяет
+        2. Смещение центра — bullish сдвигает вверх
+
+        keep_positions=True: при перестройке сохраняет купленные позиции
         """
         rp = self.config.range_pct
 
         # ═══ AI: Динамический диапазон ═══
         if self.model and abs(ai_signal) > 0.1:
             if ai_signal > 0.3:
-                # Bullish: сужаем диапазон (цена скорее пойдёт вверх, не нужен широкий)
-                rp *= (1 - ai_signal * 0.3)  # до -30% при signal=1.0
+                rp *= (1 - ai_signal * 0.2)  # до -20% (осторожнее чем раньше)
             elif ai_signal < -0.3:
-                # Bearish: расширяем диапазон (ловим больше уровней при падении)
                 rp *= (1 + abs(ai_signal) * 0.3)  # до +30%
-            rp = max(1.0, min(rp, 5.0))  # Ограничиваем 1-5%
+            rp = max(2.0, min(rp, 10.0))  # Мин 2%, макс 10%
 
         # ═══ AI: Смещение центра сетки ═══
         shift = 0.0
         if self.model and abs(ai_signal) > 0.2:
-            # Bullish: сдвигаем сетку вверх (центр выше текущей цены)
-            # Bearish: сдвигаем вниз (больше уровней для покупки)
-            shift = ai_signal * 0.3  # до 30% от диапазона
+            shift = ai_signal * 0.2  # до 20% от диапазона (осторожнее)
 
         half_range = price * rp / 100
         center = price * (1 + shift * rp / 100)
         lower = center - half_range
         upper = center + half_range
+
+        # Если есть открытые позиции — расширяем сетку чтобы покрыть их
+        if keep_positions:
+            bought = self.state["grid"].get("bought_levels", {})
+            for pos in bought.values():
+                bp = pos.get("buy_price", 0)
+                if bp > 0:
+                    lower = min(lower, bp * 0.98)  # 2% запас ниже самой низкой покупки
+                    upper = max(upper, bp * 1.03)  # 3% запас выше (для продажи)
 
         step = (upper - lower) / self.config.grid_count
         levels = [round(lower + i * step, 8) for i in range(1, self.config.grid_count)]
@@ -353,14 +360,13 @@ class LiveGridTrader:
         if not grid["levels"]:
             self.setup_grid(price, ai_signal)
 
-        # 5. Проверяем диапазон
+        # 5. Проверяем диапазон — расширяем сетку, НЕ теряем позиции
         if price < grid["lower"] or price > grid["upper"]:
-            logger.info("⚡ Цена %.2f вышла за диапазон [%.2f, %.2f] — перенастройка",
+            logger.info("⚡ Цена %.2f вышла за диапазон [%.2f, %.2f] — расширяем сетку",
                        price, grid["lower"], grid["upper"])
             self._cancel_all_orders()
-            self.setup_grid(price, ai_signal)
-            grid["bought_levels"] = {}
-            return
+            self.setup_grid(price, ai_signal, keep_positions=True)
+            # НЕ обнуляем bought_levels — сохраняем открытые позиции
 
         # ═══ AI: Адаптивный размер ордера ═══
         base_order_size = grid["order_size"]

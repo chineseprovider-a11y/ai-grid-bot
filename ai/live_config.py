@@ -9,8 +9,8 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "
 
 @dataclass
 class SafetyConfig:
-    max_drawdown_pct: float = 10.0       # Макс. просадка — стоп торговли
-    stop_loss_per_position_pct: float = 5.0  # Стоп-лосс на одну позицию
+    max_drawdown_pct: float = 15.0       # Макс. просадка — стоп торговли
+    stop_loss_per_position_pct: float = 8.0  # Стоп-лосс на одну позицию
     max_open_positions: int = 12         # Макс. кол-во открытых позиций
     max_position_value_pct: float = 80.0  # Макс. % депозита в позициях
     daily_loss_limit: float = 50.0       # Макс. убыток за день ($)
@@ -20,8 +20,8 @@ class SafetyConfig:
 class LiveConfig:
     symbol: str = "BTC/USDT"
     investment: float = 100.0
-    grid_count: int = 12
-    range_pct: float = 2.5
+    grid_count: int = 8
+    range_pct: float = 5.0
     fee_rate: float = 0.001
     testnet: bool = True                 # True = Binance Testnet (без реальных денег)
     poll_interval_seconds: int = 60      # Как часто проверять рынок
