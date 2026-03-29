@@ -1,14 +1,14 @@
 """
-Live Grid Trading Bot — реальная торговля на Binance.
+Live Grid Trading Bot — paper trading и реальная торговля на Binance.
+
+Режимы:
+    paper_trading=True  — реальные цены, симуляция ордеров (рекомендуется)
+    testnet=True        — Binance Testnet (фейковые цены)
+    оба False           — реальная торговля
 
 Запуск:
-    # Testnet (безопасно, фейковые деньги):
-    export BINANCE_API_KEY="your_testnet_key"
-    export BINANCE_API_SECRET="your_testnet_secret"
     python -m ai.live_trader
-
-    # Реальная торговля:
-    Измените testnet=False в data/live_config.json
+    python -m ai.multi_trader
 """
 
 import os
@@ -60,19 +60,25 @@ class LiveGridTrader:
         self.state_path = os.path.join(DATA_DIR, f"live_state_{safe_symbol}.json")
         self.command_path = os.path.join(DATA_DIR, "live_commands.json")
 
-        # Инициализация биржи
-        self.exchange = ccxt.binance({
-            "apiKey": config.api_key,
-            "secret": config.api_secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-        })
+        # ═══ Paper trading: реальные цены без ордеров ═══
+        self.paper_mode = config.paper_trading
 
-        if config.testnet:
-            self.exchange.set_sandbox_mode(True)
-            logger.info("🧪 TESTNET MODE — торговля без реальных денег")
+        if self.paper_mode:
+            # Публичная биржа (без ключей) — только для получения цен
+            self.exchange = ccxt.binance({"enableRateLimit": True})
+            logger.info("📝 PAPER TRADING — реальные цены, симуляция ордеров")
         else:
-            logger.warning("⚠️ РЕАЛЬНАЯ ТОРГОВЛЯ — будут использованы настоящие деньги!")
+            self.exchange = ccxt.binance({
+                "apiKey": config.api_key,
+                "secret": config.api_secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            })
+            if config.testnet:
+                self.exchange.set_sandbox_mode(True)
+                logger.info("🧪 TESTNET MODE — торговля без реальных денег")
+            else:
+                logger.warning("⚠️ РЕАЛЬНАЯ ТОРГОВЛЯ — будут использованы настоящие деньги!")
 
         # Загружаем информацию о рынках (для округления)
         self.market_info = {}
@@ -86,11 +92,7 @@ class LiveGridTrader:
                     "min_amount": m.get("limits", {}).get("amount", {}).get("min", 0),
                     "min_cost": m.get("limits", {}).get("cost", {}).get("min", 0),
                 }
-                logger.info("📊 %s: amount_prec=%s, price_prec=%s, min_amount=%s, min_cost=%s",
-                           config.symbol, self.market_info["amount_precision"],
-                           self.market_info["price_precision"],
-                           self.market_info["min_amount"],
-                           self.market_info["min_cost"])
+                logger.info("📊 %s: min_cost=$%s", config.symbol, self.market_info["min_cost"])
         except Exception as e:
             logger.warning("Не удалось загрузить рынки: %s", e)
 
@@ -111,13 +113,23 @@ class LiveGridTrader:
             except Exception as e:
                 logger.warning("AI модель недоступна: %s", e)
 
+        # ═══ Кеш быстрых индикаторов ═══
+        self._indicator_cache = {
+            "rsi": 50.0,
+            "ema_fast": 0.0,   # EMA 12
+            "ema_slow": 0.0,   # EMA 26
+            "trend": "neutral", # "up", "down", "neutral"
+            "last_update": None,
+        }
+
         # Состояние
         self.state = self._default_state()
 
     def _default_state(self) -> dict:
         return {
-            "version": 1,
+            "version": 2,
             "symbol": self.config.symbol,
+            "mode": "paper" if self.paper_mode else ("testnet" if self.config.testnet else "live"),
             "started_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "status": "running",
@@ -141,6 +153,13 @@ class LiveGridTrader:
                 "size_multiplier": 1.0,
                 "take_profit_pct": 0.0,
             },
+            "indicators": {
+                "rsi": 50.0,
+                "ema_fast": 0.0,
+                "ema_slow": 0.0,
+                "trend": "neutral",
+            },
+            "ai_decisions": [],  # Лог AI-решений для дашборда
             "pending_orders": {},
             "trade_history": [],
             "equity_curve": [],
@@ -161,6 +180,10 @@ class LiveGridTrader:
         if os.path.exists(self.state_path):
             with open(self.state_path) as f:
                 self.state = json.load(f)
+            # Миграция: добавляем новые поля если их нет
+            self.state.setdefault("ai_decisions", [])
+            self.state.setdefault("indicators", {"rsi": 50, "ema_fast": 0, "ema_slow": 0, "trend": "neutral"})
+            self.state.setdefault("mode", "paper" if self.paper_mode else "testnet")
             logger.info("📂 Состояние загружено (%d сделок в истории)",
                        len(self.state.get("trade_history", [])))
         else:
@@ -171,7 +194,6 @@ class LiveGridTrader:
         self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
         os.makedirs(DATA_DIR, exist_ok=True)
 
-        # Атомарная запись: temp → rename
         fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix=".json")
         try:
             with os.fdopen(fd, "w") as f:
@@ -186,7 +208,6 @@ class LiveGridTrader:
         """Проверяет команды от UI (pause/resume/stop)."""
         if not os.path.exists(self.command_path):
             return
-
         try:
             with open(self.command_path) as f:
                 commands = json.load(f)
@@ -207,46 +228,110 @@ class LiveGridTrader:
             logger.error("Ошибка чтения команд: %s", e)
 
     # ═══════════════════════════════════════════
+    # Быстрые индикаторы (каждый цикл)
+    # ═══════════════════════════════════════════
+
+    def update_fast_indicators(self):
+        """
+        Обновляет RSI и EMA каждый цикл на основе свежих OHLCV данных.
+        Используется для trend filter и дополнительной фильтрации.
+        """
+        try:
+            # Получаем последние 30 свечей (1h) — достаточно для RSI-14 и EMA-26
+            ohlcv = self.exchange.fetch_ohlcv(self.config.symbol, "1h", limit=30)
+            if len(ohlcv) < 26:
+                return
+
+            closes = np.array([c[4] for c in ohlcv])
+
+            # RSI-14
+            deltas = np.diff(closes)
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = np.mean(gains[-14:])
+            avg_loss = np.mean(losses[-14:])
+            if avg_loss == 0:
+                rsi = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100.0 - (100.0 / (1.0 + rs))
+
+            # EMA-12 и EMA-26
+            def ema(data, period):
+                multiplier = 2 / (period + 1)
+                result = data[0]
+                for val in data[1:]:
+                    result = (val - result) * multiplier + result
+                return result
+
+            ema_fast = ema(closes, 12)
+            ema_slow = ema(closes, 26)
+
+            # Определяем тренд
+            if ema_fast > ema_slow * 1.002:  # 0.2% запас от шума
+                trend = "up"
+            elif ema_fast < ema_slow * 0.998:
+                trend = "down"
+            else:
+                trend = "neutral"
+
+            self._indicator_cache = {
+                "rsi": round(rsi, 1),
+                "ema_fast": round(ema_fast, 2),
+                "ema_slow": round(ema_slow, 2),
+                "trend": trend,
+                "last_update": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # Сохраняем в state для дашборда
+            self.state["indicators"] = {
+                "rsi": self._indicator_cache["rsi"],
+                "ema_fast": self._indicator_cache["ema_fast"],
+                "ema_slow": self._indicator_cache["ema_slow"],
+                "trend": trend,
+            }
+
+        except Exception as e:
+            logger.debug("Ошибка обновления индикаторов: %s", e)
+
+    # ═══════════════════════════════════════════
     # Сетка
     # ═══════════════════════════════════════════
 
     def setup_grid(self, price: float, ai_signal: float = 0.0, keep_positions: bool = False):
         """
         Настраивает сетку уровней вокруг текущей цены.
-        AI влияет на:
-        1. Динамический диапазон — bullish сужает, bearish расширяет
-        2. Смещение центра — bullish сдвигает вверх
-
-        keep_positions=True: при перестройке сохраняет купленные позиции
+        AI влияет на диапазон и смещение.
+        keep_positions=True: при перестройке сохраняет купленные позиции.
         """
         rp = self.config.range_pct
 
         # ═══ AI: Динамический диапазон ═══
         if self.model and abs(ai_signal) > 0.1:
             if ai_signal > 0.3:
-                rp *= (1 - ai_signal * 0.2)  # до -20% (осторожнее чем раньше)
+                rp *= (1 - ai_signal * 0.2)  # до -20%
             elif ai_signal < -0.3:
                 rp *= (1 + abs(ai_signal) * 0.3)  # до +30%
-            rp = max(2.0, min(rp, 10.0))  # Мин 2%, макс 10%
+            rp = max(2.0, min(rp, 10.0))
 
         # ═══ AI: Смещение центра сетки ═══
         shift = 0.0
         if self.model and abs(ai_signal) > 0.2:
-            shift = ai_signal * 0.2  # до 20% от диапазона (осторожнее)
+            shift = ai_signal * 0.2
 
         half_range = price * rp / 100
         center = price * (1 + shift * rp / 100)
         lower = center - half_range
         upper = center + half_range
 
-        # Если есть открытые позиции — расширяем сетку чтобы покрыть их
+        # Расширяем чтобы покрыть открытые позиции
         if keep_positions:
             bought = self.state["grid"].get("bought_levels", {})
             for pos in bought.values():
                 bp = pos.get("buy_price", 0)
                 if bp > 0:
-                    lower = min(lower, bp * 0.98)  # 2% запас ниже самой низкой покупки
-                    upper = max(upper, bp * 1.03)  # 3% запас выше (для продажи)
+                    lower = min(lower, bp * 0.98)
+                    upper = max(upper, bp * 1.03)
 
         step = (upper - lower) / self.config.grid_count
         levels = [round(lower + i * step, 8) for i in range(1, self.config.grid_count)]
@@ -284,7 +369,7 @@ class LiveGridTrader:
             X = np.expand_dims(scaled, axis=0)
             probs = self.model.predict(X, verbose=0)[0]
 
-            raw_signal = float(probs[2] - probs[0])  # bullish - bearish
+            raw_signal = float(probs[2] - probs[0])
 
             # Скользящее среднее
             ai_state = self.state["ai_state"]
@@ -305,7 +390,7 @@ class LiveGridTrader:
 
             ai_state["last_prediction_time"] = datetime.now(timezone.utc).isoformat()
 
-            # Записываем AI-параметры для дашборда
+            # Записываем AI-параметры
             sig = ai_state["signal"]
             ai_state["size_multiplier"] = round(max(0.6, min(1.0 + sig * 0.5, 1.5)), 2)
             ai_state["take_profit_pct"] = round(sig * 1.5 if sig > 0.3 else (sig * 0.3 if sig < -0.3 else 0.0), 2)
@@ -318,6 +403,23 @@ class LiveGridTrader:
 
         except Exception as e:
             logger.error("AI prediction error: %s", e)
+
+    def _log_ai_decision(self, action: str, reason: str, price: float, ai_signal: float):
+        """Записывает AI-решение в лог для дашборда."""
+        decisions = self.state.get("ai_decisions", [])
+        decisions.append({
+            "t": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "reason": reason,
+            "price": round(price, 2),
+            "signal": round(ai_signal, 3),
+            "rsi": self._indicator_cache.get("rsi", 50),
+            "trend": self._indicator_cache.get("trend", "neutral"),
+        })
+        # Храним последние 50 решений
+        if len(decisions) > 50:
+            decisions.pop(0)
+        self.state["ai_decisions"] = decisions
 
     # ═══════════════════════════════════════════
     # Основной цикл торговли
@@ -337,10 +439,16 @@ class LiveGridTrader:
         grid = self.state["grid"]
         order_size = grid["order_size"]
 
-        # 2. Проверяем ожидающие ордера
-        self._check_pending_orders()
+        # 2. Проверяем ожидающие ордера (не в paper mode)
+        if not self.paper_mode:
+            self._check_pending_orders()
 
-        # 3. AI предсказание (каждые N часов)
+        # 3. Обновляем быстрые индикаторы (RSI, EMA, тренд)
+        self.update_fast_indicators()
+        trend = self._indicator_cache.get("trend", "neutral")
+        rsi = self._indicator_cache.get("rsi", 50)
+
+        # 4. AI предсказание (каждые N часов)
         ai_state = self.state["ai_state"]
         last_pred = ai_state.get("last_prediction_time")
         hours_since = 999
@@ -356,23 +464,21 @@ class LiveGridTrader:
 
         ai_signal = ai_state.get("signal", 0.0)
 
-        # 4. Настройка сетки если ещё не настроена
+        # 5. Настройка сетки если ещё не настроена
         if not grid["levels"]:
             self.setup_grid(price, ai_signal)
 
-        # 5. Проверяем диапазон — расширяем сетку, НЕ теряем позиции
+        # 6. Проверяем диапазон — расширяем сетку, НЕ теряем позиции
         if price < grid["lower"] or price > grid["upper"]:
             logger.info("⚡ Цена %.2f вышла за диапазон [%.2f, %.2f] — расширяем сетку",
                        price, grid["lower"], grid["upper"])
-            self._cancel_all_orders()
+            if not self.paper_mode:
+                self._cancel_all_orders()
             self.setup_grid(price, ai_signal, keep_positions=True)
-            # НЕ обнуляем bought_levels — сохраняем открытые позиции
 
         # ═══ AI: Адаптивный размер ордера ═══
         base_order_size = grid["order_size"]
         if self.model and abs(ai_signal) > 0.2:
-            # Bullish: увеличиваем размер покупки (до +50%)
-            # Bearish: уменьшаем размер (до -40%)
             size_multiplier = 1.0 + ai_signal * 0.5
             size_multiplier = max(0.6, min(size_multiplier, 1.5))
             adjusted_order_size = base_order_size * size_multiplier
@@ -381,17 +487,14 @@ class LiveGridTrader:
             size_multiplier = 1.0
 
         # ═══ AI: Динамический take-profit ═══
-        # Базовый TP: продаём когда цена >= уровня сетки (0%)
-        # Bullish: ждём доп. прибыль перед продажей
-        # Bearish: продаём быстрее (даже с маленькой прибылью)
         if self.model and ai_signal > 0.3:
-            take_profit_pct = ai_signal * 1.5  # до 1.5% доп. прибыли при signal=1.0
+            take_profit_pct = ai_signal * 1.5
         elif self.model and ai_signal < -0.3:
-            take_profit_pct = ai_signal * 0.3  # отрицательный = продаём раньше
+            take_profit_pct = ai_signal * 0.3
         else:
             take_profit_pct = 0.0
 
-        # 6. Торговая логика
+        # 7. Торговая логика
         if self.state["status"] != "running":
             return
 
@@ -403,15 +506,28 @@ class LiveGridTrader:
 
             # ═══ BUY ═══
             if price <= lvl and lvl_key not in bought and balance >= adjusted_order_size:
-                # AI фильтр: блокируем покупки при сильном bearish
-                if ai_signal < -0.4:
+
+                # --- TREND FILTER: не покупаем в даунтренде ---
+                if trend == "down" and rsi < 35:
+                    self._log_ai_decision("block_buy", "downtrend + RSI<35", price, ai_signal)
                     continue
 
-                # AI: при умеренном bearish (-0.2..-0.4) покупаем только на нижних уровнях
-                if ai_signal < -0.2 and self.model:
+                # --- AI фильтр: блокируем при сильном bearish ---
+                if ai_signal < -0.4:
+                    self._log_ai_decision("block_buy", f"bearish signal {ai_signal:.2f}", price, ai_signal)
+                    continue
+
+                # --- Trend filter: при даунтренде только нижние уровни ---
+                if trend == "down" and self.model:
                     grid_mid = (grid["lower"] + grid["upper"]) / 2
                     if lvl > grid_mid:
-                        continue  # Пропускаем верхние уровни при bearish
+                        self._log_ai_decision("skip_upper", "downtrend, skip upper levels", price, ai_signal)
+                        continue
+
+                # --- RSI фильтр: не покупаем при перекупленности ---
+                if rsi > 75:
+                    self._log_ai_decision("block_buy", f"RSI overbought {rsi:.0f}", price, ai_signal)
+                    continue
 
                 amount = adjusted_order_size / price
                 allowed, reason = self.safety.check_can_buy(self.state, price, amount)
@@ -428,13 +544,11 @@ class LiveGridTrader:
                         "order_id": order.get("id", ""),
                         "ai_signal_at_buy": round(ai_signal, 3),
                         "size_multiplier": round(size_multiplier, 2),
+                        "peak_price": price,  # для trailing stop
                     }
                     self.state["balance"] -= adjusted_order_size
-                    ai_tag = f" [AI x{size_multiplier:.1f}]" if self.model else ""
                     self._log_trade("buy", price, amount, order)
-                    if self.model:
-                        logger.info("🧠 AI BUY: signal=%.2f, size=x%.1f, order=$%.2f",
-                                   ai_signal, size_multiplier, adjusted_order_size)
+                    self._log_ai_decision("buy", f"signal={ai_signal:.2f}, rsi={rsi:.0f}, trend={trend}", price, ai_signal)
 
             # ═══ SELL ═══
             elif price >= lvl and lvl_key in bought:
@@ -444,22 +558,28 @@ class LiveGridTrader:
 
                 # ═══ AI: Динамический take-profit ═══
                 if self.model and take_profit_pct > 0:
-                    # Bullish: ждём доп. прибыль
                     if price_gain_pct < take_profit_pct:
-                        # Но не ждём дольше 48 часов
                         buy_time = pos.get("buy_time", "")
                         if buy_time:
                             try:
                                 dt = datetime.fromisoformat(buy_time)
                                 hold_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
                                 if hold_hours < 48:
-                                    continue  # Ждём большей прибыли
+                                    self._log_ai_decision("hold", f"gain {price_gain_pct:.1f}% < tp {take_profit_pct:.1f}%", price, ai_signal)
+                                    continue
                             except Exception:
                                 pass
 
-                # Стоп-лосс проверка
-                if self.safety.check_should_force_sell(pos, price):
+                # --- RSI фильтр: при перепроданности не продаём (цена может отскочить) ---
+                if rsi < 25 and price_gain_pct < 0:
+                    self._log_ai_decision("hold_oversold", f"RSI={rsi:.0f}, wait for bounce", price, ai_signal)
+                    continue
+
+                # Стоп-лосс / trailing stop проверка
+                force_sell = self.safety.check_should_force_sell(pos, price)
+                if force_sell:
                     logger.warning("🔴 СТОП-ЛОСС: принудительная продажа!")
+                    self._log_ai_decision("stop_loss", f"loss {price_gain_pct:.1f}%", price, ai_signal)
 
                 amount = pos["amount"]
                 order = self._place_order("sell", price, amount, lvl)
@@ -471,13 +591,17 @@ class LiveGridTrader:
                     self.state["balance"] += sell_value
                     del bought[lvl_key]
                     self._log_trade("sell", price, amount, order, profit)
-                    if self.model:
-                        logger.info("🧠 AI SELL: gain=%.2f%%, tp_target=%.2f%%, signal=%.2f",
-                                   price_gain_pct, take_profit_pct, ai_signal)
+                    self._log_ai_decision("sell", f"gain={price_gain_pct:.1f}%, profit=${profit:.2f}", price, ai_signal)
 
-        # Стоп-лосс для всех позиций
+        # ═══ Trailing stop + стоп-лосс для всех позиций ═══
         for lvl_key in list(bought.keys()):
             pos = bought[lvl_key]
+
+            # Обновляем peak_price для trailing stop
+            if price > pos.get("peak_price", pos["buy_price"]):
+                pos["peak_price"] = price
+
+            # Проверяем trailing stop и обычный stop-loss
             if self.safety.check_should_force_sell(pos, price):
                 amount = pos["amount"]
                 order = self._place_order("sell", price, amount, float(lvl_key))
@@ -488,12 +612,11 @@ class LiveGridTrader:
                     self.state["balance"] += sell_value
                     del bought[lvl_key]
                     self._log_trade("sell", price, amount, order, profit)
+                    loss_pct = (pos["buy_price"] - price) / pos["buy_price"] * 100
+                    self._log_ai_decision("forced_sell", f"trailing/stop loss {loss_pct:.1f}%", price, ai_signal)
 
-        # 7. Обновляем equity
-        holdings_value = sum(
-            pos["amount"] * price
-            for pos in bought.values()
-        )
+        # 8. Обновляем equity
+        holdings_value = sum(pos["amount"] * price for pos in bought.values())
         equity = self.state["balance"] + holdings_value
         self.state["current_equity"] = equity
 
@@ -513,7 +636,6 @@ class LiveGridTrader:
                 "e": round(equity, 2),
                 "p": round(price, 2),
             })
-            # Хранить макс 720 точек (30 дней)
             if len(curve) > 720:
                 curve.pop(0)
 
@@ -526,7 +648,7 @@ class LiveGridTrader:
         precision = self.market_info.get("amount_precision", 8)
         if isinstance(precision, int):
             return float(self.exchange.decimal_to_precision(
-                amount, 1, precision, 2))  # TRUNCATE, DECIMAL_PLACES
+                amount, 1, precision, 2))
         return round(amount, 8)
 
     def _round_price(self, price: float) -> float:
@@ -538,13 +660,11 @@ class LiveGridTrader:
         return round(price, 2)
 
     def _place_order(self, side: str, price: float, amount: float, level: float) -> dict:
-        """Размещает лимитный ордер на бирже."""
+        """Размещает ордер. В paper mode — симулирует."""
         try:
-            # Округляем по правилам биржи
             amount = self._round_amount(amount)
             price = self._round_price(price)
 
-            # Проверяем минимумы
             min_amount = self.market_info.get("min_amount", 0)
             min_cost = self.market_info.get("min_cost", 0)
 
@@ -561,6 +681,20 @@ class LiveGridTrader:
             if amount <= 0:
                 return None
 
+            # ═══ Paper mode: симуляция ═══
+            if self.paper_mode:
+                order = {
+                    "id": f"paper_{int(time.time()*1000)}",
+                    "status": "closed",
+                    "side": side,
+                    "price": price,
+                    "amount": amount,
+                }
+                logger.info("📝 PAPER %s: %.8f %s @ %.2f",
+                           side.upper(), amount, self.config.symbol, price)
+                return order
+
+            # ═══ Реальный ордер ═══
             if side == "buy":
                 order = self.exchange.create_limit_buy_order(
                     self.config.symbol, amount, price
@@ -588,6 +722,8 @@ class LiveGridTrader:
 
     def _cancel_all_orders(self):
         """Отменяет все открытые ордера."""
+        if self.paper_mode:
+            return
         try:
             open_orders = self.exchange.fetch_open_orders(self.config.symbol)
             for order in open_orders:
@@ -634,7 +770,6 @@ class LiveGridTrader:
             "time": datetime.now(timezone.utc).isoformat(),
             "message": message,
         })
-        # Хранить макс 100 ошибок
         if len(errors) > 100:
             errors.pop(0)
         self.state["error_log"] = errors
@@ -645,6 +780,9 @@ class LiveGridTrader:
 
     def reconcile(self):
         """Сверка состояния с биржей после перезапуска."""
+        if self.paper_mode:
+            logger.info("📝 Paper mode — сверка не требуется")
+            return
         try:
             balance = self.exchange.fetch_balance()
             usdt = balance.get("USDT", {}).get("free", 0)
@@ -660,19 +798,18 @@ class LiveGridTrader:
         self.running = True
         os.makedirs(DATA_DIR, exist_ok=True)
 
-        # Загружаем сохранённое состояние
         self.load_state()
         self.state["status"] = "running"
 
-        # Сверка с биржей
         self.reconcile()
 
+        mode_str = "PAPER" if self.paper_mode else ("TESTNET" if self.config.testnet else "LIVE")
         logger.info("=" * 50)
         logger.info("🚀 СТАРТ: %s | Депозит: $%.2f | Сетка: %d уровней, %.1f%%",
                     self.config.symbol, self.config.investment,
                     self.config.grid_count, self.config.range_pct)
-        logger.info("   Testnet: %s | AI: %s | Интервал: %dс",
-                    self.config.testnet, bool(self.model),
+        logger.info("   Режим: %s | AI: %s | Интервал: %dс",
+                    mode_str, bool(self.model),
                     self.config.poll_interval_seconds)
         logger.info("=" * 50)
 
@@ -692,13 +829,11 @@ class LiveGridTrader:
         retry_delay = 1
         while self.running:
             try:
-                # Проверяем команды от UI
                 self.check_commands()
 
                 if not self.running:
                     break
 
-                # Проверка безопасности
                 action = self.safety.pre_cycle_check(self.state)
                 if action == "pause":
                     self.state["status"] = "paused"
@@ -706,17 +841,11 @@ class LiveGridTrader:
                 elif action == "stop":
                     break
 
-                # Торговый цикл
                 if self.state["status"] == "running":
                     self.run_cycle()
 
-                # Сохраняем состояние
                 self.save_state()
-
-                # Сброс задержки при успехе
                 retry_delay = 1
-
-                # Ждём
                 time.sleep(self.config.poll_interval_seconds)
 
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
@@ -758,13 +887,10 @@ def main():
 
     setup_logging(config.symbol)
 
-    if not config.api_key or not config.api_secret:
+    if not config.paper_trading and not config.api_key:
         print("❌ Установите переменные окружения:")
         print("   export BINANCE_API_KEY='ваш_ключ'")
         print("   export BINANCE_API_SECRET='ваш_секрет'")
-        print()
-        print("Для Testnet ключи можно получить на:")
-        print("   https://testnet.binance.vision/")
         sys.exit(1)
 
     trader = LiveGridTrader(config)

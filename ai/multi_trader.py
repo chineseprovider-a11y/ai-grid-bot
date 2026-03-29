@@ -10,9 +10,11 @@
 import os
 import sys
 import json
+import time
 import signal
 import logging
 import threading
+from glob import glob
 from datetime import datetime, timezone
 
 from ai.live_config import LiveConfig
@@ -122,7 +124,8 @@ def main():
     for sym, alloc in allocations.items():
         weight = portfolio.get(sym, 10)
         logger.info("   %s: $%.2f (%d%%)", sym, alloc, weight)
-    logger.info("   Testnet: %s | AI: %s", base_config.testnet, base_config.use_ai)
+    mode_str = "PAPER" if base_config.paper_trading else ("TESTNET" if base_config.testnet else "LIVE")
+    logger.info("   Режим: %s | AI: %s", mode_str, base_config.use_ai)
     logger.info("=" * 60)
 
     # Запускаем потоки
@@ -147,12 +150,66 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    # Основной поток ждёт
+    # Основной поток: ждём + ребалансировка каждые 24ч
+    rebalance_interval = 24 * 3600  # 24 часа
+    last_rebalance = time.time()
+
     try:
-        for t in threads:
-            t.join()
+        while True:
+            # Проверяем живы ли потоки
+            alive = sum(1 for t in threads if t.is_alive())
+            if alive == 0:
+                logger.warning("Все потоки завершились!")
+                break
+
+            # Ребалансировка портфеля
+            if time.time() - last_rebalance > rebalance_interval:
+                rebalance_portfolio(symbols, portfolio, total_investment)
+                last_rebalance = time.time()
+
+            time.sleep(60)
+
     except (KeyboardInterrupt, SystemExit):
         logger.info("🏁 Мультипарный бот завершён")
+
+
+def rebalance_portfolio(symbols: list, portfolio: dict, total_investment: float):
+    """
+    Ребалансировка: проверяет текущее распределение и логирует отклонения.
+    Реальная ребалансировка (перевод средств) — в будущих версиях.
+    """
+    try:
+        total_weight = sum(portfolio.get(s, 10) for s in symbols)
+        state_files = sorted(glob(os.path.join(DATA_DIR, "live_state_*.json")))
+
+        current_total = 0
+        pair_equity = {}
+        for sp in state_files:
+            try:
+                with open(sp) as f:
+                    state = json.load(f)
+                sym = state.get("symbol", "?")
+                eq = state.get("current_equity", 0)
+                pair_equity[sym] = eq
+                current_total += eq
+            except Exception:
+                pass
+
+        if current_total <= 0:
+            return
+
+        logger.info("📊 РЕБАЛАНСИРОВКА — анализ портфеля:")
+        for sym in symbols:
+            target_pct = portfolio.get(sym, 10) / total_weight * 100
+            actual = pair_equity.get(sym, 0)
+            actual_pct = actual / current_total * 100 if current_total > 0 else 0
+            diff = actual_pct - target_pct
+            status = "✅" if abs(diff) < 3 else ("⚠️" if abs(diff) < 5 else "🔴")
+            logger.info("   %s %s: целевой %.0f%%, текущий %.0f%% (отклонение %+.1f%%)",
+                       status, sym, target_pct, actual_pct, diff)
+
+    except Exception as e:
+        logger.error("Ошибка ребалансировки: %s", e)
 
 
 if __name__ == "__main__":

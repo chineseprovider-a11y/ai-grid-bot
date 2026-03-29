@@ -11,21 +11,23 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "
 class SafetyConfig:
     max_drawdown_pct: float = 15.0       # Макс. просадка — стоп торговли
     stop_loss_per_position_pct: float = 8.0  # Стоп-лосс на одну позицию
-    max_open_positions: int = 12         # Макс. кол-во открытых позиций
+    trailing_stop_pct: float = 3.0       # Trailing stop: откат от пика (%)
+    max_open_positions: int = 8          # Макс. кол-во открытых позиций
     max_position_value_pct: float = 80.0  # Макс. % депозита в позициях
-    daily_loss_limit: float = 50.0       # Макс. убыток за день ($)
+    daily_loss_limit: float = 250.0      # Макс. убыток за день ($)
 
 
 @dataclass
 class LiveConfig:
     symbol: str = "BTC/USDT"
-    investment: float = 100.0
+    investment: float = 5000.0
     grid_count: int = 8
     range_pct: float = 5.0
     fee_rate: float = 0.001
-    testnet: bool = True                 # True = Binance Testnet (без реальных денег)
+    paper_trading: bool = True           # Paper trading: реальные цены, симуляция ордеров
+    testnet: bool = False                # Binance Testnet (фейковые цены)
     poll_interval_seconds: int = 60      # Как часто проверять рынок
-    ai_prediction_interval_hours: int = 12
+    ai_prediction_interval_hours: int = 1  # AI прогноз каждый час
     use_ai: bool = True
     safety: SafetyConfig = None
 
@@ -33,7 +35,8 @@ class LiveConfig:
         if self.safety is None:
             self.safety = SafetyConfig()
         elif isinstance(self.safety, dict):
-            self.safety = SafetyConfig(**self.safety)
+            self.safety = SafetyConfig(**{k: v for k, v in self.safety.items()
+                                          if k in SafetyConfig.__dataclass_fields__})
 
     @property
     def api_key(self) -> str:
@@ -47,7 +50,6 @@ class LiveConfig:
         path = path or CONFIG_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
         data = asdict(self)
-        # Не сохраняем ключи в файл
         data.pop("api_key", None)
         data.pop("api_secret", None)
         with open(path, "w") as f:
@@ -60,4 +62,5 @@ class LiveConfig:
             return cls()
         with open(path) as f:
             data = json.load(f)
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items()
+                      if k in cls.__dataclass_fields__})
