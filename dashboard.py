@@ -222,7 +222,7 @@ with col_chart:
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig_pie, use_container_width=True)
+    st.plotly_chart(fig_pie, use_container_width=True, config={"displayModeBar": False})
 
 st.markdown("")
 
@@ -254,11 +254,11 @@ if fig_combined.data:
         height=400,
         margin=dict(l=0, r=0, t=30, b=0),
         yaxis_title="Баланс ($)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig_combined, use_container_width=True)
+    st.plotly_chart(fig_combined, use_container_width=True, config={"displayModeBar": False})
 else:
     st.info("Графики появятся после первых торговых циклов")
 
