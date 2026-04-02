@@ -282,34 +282,28 @@ all_recent_trades.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 last_3 = all_recent_trades[:3]
 
 if last_3:
-    trades_html = '<div style="display:flex; gap:10px; margin-bottom:15px;">'
-    for t in last_3:
+    trade_cols = st.columns(3)
+    for idx, t in enumerate(last_3):
         side = t.get("side", "?")
         is_buy = side == "buy"
         side_icon = "🟢 BUY" if is_buy else "🔴 SELL"
         side_color = "#00e676" if is_buy else "#ff5252"
         sym = t.get("_symbol", "?")
         price = t.get("price", 0)
-        amount = t.get("amount", 0)
         ts = fmt_time(t.get("timestamp", ""))
         profit = t.get("profit", 0)
-        profit_str = f" | P&L: ${profit:+.2f}" if not is_buy else ""
-        profit_color = "#00e676" if profit >= 0 else "#ff5252"
+        pnl_color = "#00e676" if profit >= 0 else "#ff5252"
+        pnl_html = f'<span style="color:{pnl_color}; margin-left:8px;">P&L: ${profit:+.2f}</span>' if not is_buy else ""
 
-        trades_html += f"""
-        <div class="metric-box" style="flex:1; min-width:0; padding:12px 16px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="color:{side_color}; font-weight:700; font-size:14px;">{side_icon}</span>
-                <span style="color:#8b95a5; font-size:12px;">{ts}</span>
-            </div>
-            <div style="color:white; font-size:16px; font-weight:600; margin-top:4px;">{sym} @ ${price:,.2f}</div>
-            <div style="color:#8b95a5; font-size:12px; margin-top:2px;">
-                Кол-во: {amount:.6f}{'<span style="color:' + profit_color + '; margin-left:8px;">' + f'P&L: ${profit:+.2f}' + '</span>' if not is_buy else ''}
-            </div>
-        </div>
-        """
-    trades_html += "</div>"
-    st.markdown(trades_html, unsafe_allow_html=True)
+        with trade_cols[idx]:
+            st.markdown(f"""<div class="metric-box" style="padding:12px 16px;">
+<div style="display:flex; justify-content:space-between; align-items:center;">
+<span style="color:{side_color}; font-weight:700; font-size:14px;">{side_icon}</span>
+<span style="color:#8b95a5; font-size:12px;">{ts}</span>
+</div>
+<div style="color:white; font-size:16px; font-weight:600; margin-top:4px;">{sym} @ ${price:,.2f}</div>
+<div style="color:#8b95a5; font-size:12px; margin-top:2px;">{pnl_html}</div>
+</div>""", unsafe_allow_html=True)
 
 st.markdown("")
 
