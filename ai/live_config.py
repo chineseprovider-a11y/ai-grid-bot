@@ -13,7 +13,7 @@ class SafetyConfig:
     stop_loss_per_position_pct: float = 8.0  # Стоп-лосс на одну позицию
     trailing_stop_pct: float = 3.0       # Trailing stop: откат от пика (%)
     max_open_positions: int = 8          # Макс. кол-во открытых позиций
-    max_position_value_pct: float = 80.0  # Макс. % депозита в позициях
+    max_position_value_pct: float = 90.0  # Макс. % депозита в позициях
     daily_loss_limit: float = 250.0      # Макс. убыток за день ($)
 
 

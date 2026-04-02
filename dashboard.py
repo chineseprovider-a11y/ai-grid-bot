@@ -62,7 +62,21 @@ st.markdown("""
         border-radius: 12px;
         margin-bottom: 20px;
         border: 1px solid #2d3748;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
     }
+    .header-left { flex: 1; }
+    .header-right {
+        display: flex;
+        gap: 30px;
+        align-items: center;
+    }
+    .header-stat {
+        text-align: center;
+    }
+    .header-stat-label { color: #8b95a5; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+    .header-stat-value { font-size: 22px; font-weight: 700; margin-top: 2px; }
     div[data-testid="stVerticalBlock"] > div { gap: 0.3rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -76,6 +90,17 @@ def metric_card(label, value, color="white", small=False):
         <div class="{size_class} {color}">{value}</div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def fmt_time(iso_str: str) -> str:
+    """Форматирует ISO время в красивый вид: 02.04 15:31"""
+    if not iso_str:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%d.%m %H:%M")
+    except Exception:
+        return iso_str[:16]
 
 
 def load_all_states():
@@ -102,35 +127,6 @@ if auto_refresh:
     st.sidebar.caption("Страница обновляется каждые 10 секунд")
 
 # ═══════════════════════════════════════════
-# Заголовок
-# ═══════════════════════════════════════════
-
-# Определяем режим
-mode_str = "PAPER"
-sample_state = None
-state_files = glob(os.path.join(DATA_DIR, "live_state_*.json"))
-if state_files:
-    try:
-        with open(state_files[0]) as f:
-            sample_state = json.load(f)
-        mode_str = sample_state.get("mode", "paper").upper()
-    except Exception:
-        pass
-
-mode_colors = {"PAPER": "#ffc107", "TESTNET": "#ff9800", "LIVE": "#ff5252"}
-mode_color = mode_colors.get(mode_str, "#8b95a5")
-
-st.markdown(f"""
-<div class="header-bar">
-    <h1 style="margin:0; color:white;">📊 AI Grid Bot — Live Dashboard</h1>
-    <p style="color:#8b95a5; margin:5px 0 0 0;">
-        Мониторинг торговли в реальном времени |
-        <span style="color:{mode_color}; font-weight:bold;">{mode_str} MODE</span>
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════
 # Данные
 # ═══════════════════════════════════════════
 
@@ -144,7 +140,7 @@ if not all_states:
     st.stop()
 
 # ═══════════════════════════════════════════
-# Общая сводка портфеля
+# Общие расчёты
 # ═══════════════════════════════════════════
 
 total_equity = sum(s.get("current_equity", 0) for s in all_states)
@@ -160,14 +156,89 @@ total_realized = sum(
     sum(t.get("profit", 0) for t in s.get("trade_history", []) if t.get("side") == "sell")
     for s in all_states
 )
+sell_trades = sum(
+    sum(1 for t in s.get("trade_history", []) if t.get("side") == "sell")
+    for s in all_states
+)
+
+# Режим
+mode_str = "PAPER"
+sample_state = all_states[0] if all_states else None
+if sample_state:
+    mode_str = sample_state.get("mode", "paper").upper()
+
+mode_colors = {"PAPER": "#ffc107", "TESTNET": "#ff9800", "LIVE": "#ff5252"}
+mode_color = mode_colors.get(mode_str, "#8b95a5")
+
+# Uptime
+started_at = min((s.get("started_at", "") for s in all_states), default="")
+uptime_str = ""
+if started_at:
+    try:
+        dt_start = datetime.fromisoformat(started_at)
+        delta = datetime.now(timezone.utc) - dt_start
+        days = delta.days
+        hours = delta.seconds // 3600
+        uptime_str = f"{days}д {hours}ч" if days > 0 else f"{hours}ч {(delta.seconds % 3600) // 60}м"
+    except Exception:
+        pass
+
+# BTC price
+btc_price = 0
+for s in all_states:
+    if s.get("symbol") == "BTC/USDT":
+        curve = s.get("equity_curve", [])
+        if curve:
+            btc_price = curve[-1].get("p", 0)
+        break
+
+# ═══════════════════════════════════════════
+# Заголовок с быстрой сводкой
+# ═══════════════════════════════════════════
+
+pnl_color = "#00e676" if total_pnl >= 0 else "#ff5252"
+
+header_right_html = f"""
+<div class="header-right">
+    <div class="header-stat">
+        <div class="header-stat-label">BTC</div>
+        <div class="header-stat-value white">${btc_price:,.0f}</div>
+    </div>
+    <div class="header-stat">
+        <div class="header-stat-label">P&L</div>
+        <div class="header-stat-value" style="color:{pnl_color};">${total_pnl:+.2f} ({total_pnl_pct:+.1f}%)</div>
+    </div>
+    <div class="header-stat">
+        <div class="header-stat-label">Аптайм</div>
+        <div class="header-stat-value white">{uptime_str}</div>
+    </div>
+</div>
+"""
+
+st.markdown(f"""
+<div class="header-bar">
+    <div class="header-left">
+        <h1 style="margin:0; color:white;">📊 AI Grid Bot — Live Dashboard</h1>
+        <p style="color:#8b95a5; margin:5px 0 0 0;">
+            Мониторинг торговли в реальном времени |
+            <span style="color:{mode_color}; font-weight:bold;">{mode_str} MODE</span>
+        </p>
+    </div>
+    {header_right_html}
+</div>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════
+# Общая сводка портфеля
+# ═══════════════════════════════════════════
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 with c1: metric_card("Портфель", f"${total_equity:.2f}", "blue")
-with c2: metric_card("P&L", f"${total_pnl:+.2f}", "green" if total_pnl >= 0 else "red")
-with c3: metric_card("ROI", f"{total_pnl_pct:+.2f}%", "green" if total_pnl_pct >= 0 else "red")
-with c4: metric_card("Реализовано", f"${total_realized:+.2f}", "green" if total_realized >= 0 else "red")
+with c2: metric_card("P&L", f"${total_pnl:+.2f} ({total_pnl_pct:+.1f}%)", "green" if total_pnl >= 0 else "red")
+with c3: metric_card("Позиции", f"{total_positions}", "amber")
+with c4: metric_card(f"Реализовано ({sell_trades} сд.)", f"${total_realized:+.2f}", "green" if total_realized >= 0 else "red")
 with c5: metric_card("Макс. просадка", f"{max_dd:.1f}%", "red" if max_dd > 5 else "amber")
-with c6: metric_card("Активных", f"{running_count} / {len(all_states)}", "green" if running_count > 0 else "red")
+with c6: metric_card("Всего сделок", f"{total_trades}", "blue")
 
 st.markdown("")
 
@@ -187,29 +258,32 @@ with col_table:
         inv = s.get("initial_investment", 0)
         pnl = equity - inv
         pnl_pct = (pnl / inv * 100) if inv > 0 else 0
-        status = s.get("status", "?")
-        trades = len(s.get("trade_history", []))
         positions = len(s.get("grid", {}).get("bought_levels", {}))
-        ai_sig = s.get("ai_state", {}).get("signal", 0)
-        dd = s.get("safety", {}).get("current_drawdown", 0) * 100
         indicators = s.get("indicators", {})
         trend = indicators.get("trend", "-")
         rsi = indicators.get("rsi", 50)
+        weight = PORTFOLIO_WEIGHTS.get(symbol, 0)
 
+        status = s.get("status", "?")
         status_emoji = {"running": "🟢", "paused": "⏸️", "stopped": "⏹️", "error": "🔴"}.get(status, "❓")
-        sig_emoji = "📈" if ai_sig > 0.2 else ("📉" if ai_sig < -0.2 else "↔️")
         trend_emoji = {"up": "📈", "down": "📉", "neutral": "↔️"}.get(trend, "-")
+
+        # Текущая цена из equity_curve
+        cur_price = 0
+        curve = s.get("equity_curve", [])
+        if curve:
+            cur_price = curve[-1].get("p", 0)
 
         pairs_data.append({
             "": status_emoji,
             "Пара": symbol,
+            "Вес": f"{weight}%",
+            "Цена": f"${cur_price:,.2f}" if cur_price else "-",
             "Баланс": f"${equity:.2f}",
-            "P&L": f"${pnl:+.2f}",
-            "ROI%": f"{pnl_pct:+.1f}%",
-            "AI": f"{sig_emoji} {ai_sig:.2f}",
-            "Тренд": f"{trend_emoji}",
+            "P&L": f"${pnl:+.2f} ({pnl_pct:+.1f}%)",
+            "Тренд": trend_emoji,
             "RSI": f"{rsi:.0f}",
-            "Позиц.": positions,
+            "Поз.": positions,
         })
 
     df_pairs = pd.DataFrame(pairs_data)
@@ -295,7 +369,6 @@ pnl_pct = (pnl / inv * 100) if inv > 0 else 0
 dd = live_state.get("safety", {}).get("current_drawdown", 0) * 100
 ai_state = live_state.get("ai_state", {})
 ai_sig = ai_state.get("signal", 0)
-ai_acc = ai_state.get("accuracy", 0.5)
 trades = live_state.get("trade_history", [])
 bought = live_state.get("grid", {}).get("bought_levels", {})
 indicators = live_state.get("indicators", {})
@@ -313,6 +386,12 @@ with detail_cols[5]:
     trend_emoji = {"up": "📈", "down": "📉", "neutral": "↔️"}.get(trend, "-")
     metric_card("Тренд / RSI", f"{trend_emoji} {rsi:.0f}", "green" if trend == "up" else ("red" if trend == "down" else "amber"), small=True)
 
+# Текущая цена пары
+cur_price = 0
+pair_curve = live_state.get("equity_curve", [])
+if pair_curve:
+    cur_price = pair_curve[-1].get("p", 0)
+
 # Открытые позиции
 if bought:
     st.markdown("#### Открытые позиции")
@@ -320,63 +399,78 @@ if bought:
     for lvl_key, pos in bought.items():
         buy_price = pos.get("buy_price", 0)
         peak = pos.get("peak_price", buy_price)
+        amount = pos.get("amount", 0)
+        # Текущий P&L позиции
+        if cur_price > 0 and buy_price > 0:
+            pos_pnl = (cur_price - buy_price) * amount
+            pos_pnl_pct = (cur_price - buy_price) / buy_price * 100
+            pnl_str = f"${pos_pnl:+.2f} ({pos_pnl_pct:+.1f}%)"
+        else:
+            pnl_str = "-"
         pos_data.append({
             "Уровень": f"${float(lvl_key):.2f}",
-            "Кол-во": f"{pos.get('amount', 0):.8f}",
+            "Кол-во": f"{amount:.8f}",
             "Цена покупки": f"${buy_price:.2f}",
+            "Текущий P&L": pnl_str,
             "Пик цены": f"${peak:.2f}",
             "AI при покупке": f"{pos.get('ai_signal_at_buy', 0):.2f}",
-            "Время": pos.get("buy_time", "")[:16],
+            "Время": fmt_time(pos.get("buy_time", "")),
         })
     st.dataframe(pd.DataFrame(pos_data), use_container_width=True, hide_index=True)
 
 # ═══════════════════════════════════════════
-# AI решения (лог)
+# AI решения (лог) — все записи
 # ═══════════════════════════════════════════
 
 ai_decisions = live_state.get("ai_decisions", [])
 if ai_decisions:
     with st.expander(f"🧠 AI решения ({len(ai_decisions)})", expanded=False):
-        recent_decisions = ai_decisions[-20:][::-1]
+        # Показываем все решения (новые сверху)
+        recent_decisions = ai_decisions[::-1]
         dec_data = []
         for d in recent_decisions:
             action = d.get("action", "?")
-            action_colors = {
-                "buy": "🟢 BUY",
-                "sell": "🔴 SELL",
+            action_labels = {
+                "buy": "🟢 ПОКУПКА",
+                "sell": "🔴 ПРОДАЖА",
                 "block_buy": "🚫 БЛОК",
                 "skip_upper": "⏭️ ПРОПУСК",
                 "hold": "⏳ ДЕРЖИМ",
-                "hold_oversold": "⏳ OVERSOLD",
-                "stop_loss": "🔴 СТОП",
-                "forced_sell": "🔴 FORCED",
+                "hold_oversold": "⏳ ПЕРЕПРОДАН",
+                "stop_loss": "🔴 СТОП-ЛОСС",
+                "forced_sell": "🔴 СТОП-ЛОСС",
             }
+            trend_val = d.get("trend", "-")
+            trend_emoji = {"up": "📈", "down": "📉", "neutral": "↔️"}.get(trend_val, "-")
             dec_data.append({
-                "Время": d.get("t", "")[:16],
-                "Действие": action_colors.get(action, action),
+                "Время": fmt_time(d.get("t", "")),
+                "Действие": action_labels.get(action, action),
                 "Причина": d.get("reason", ""),
                 "Цена": f"${d.get('price', 0):.2f}",
                 "AI": f"{d.get('signal', 0):.2f}",
                 "RSI": f"{d.get('rsi', 50):.0f}",
-                "Тренд": d.get("trend", "-"),
+                "Тренд": trend_emoji,
             })
-        st.dataframe(pd.DataFrame(dec_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(dec_data), use_container_width=True, hide_index=True,
+                     height=min(600, 40 + 35 * len(dec_data)))
 
-# Последние сделки
+# Последние сделки — все записи
 if trades:
     with st.expander(f"Последние сделки ({len(trades)})", expanded=False):
-        recent = trades[-15:][::-1]
+        # Показываем все сделки (новые сверху)
+        all_trades = trades[::-1]
         trade_data = []
-        for t in recent:
+        for t in all_trades:
             side_emoji = "🟢 BUY" if t["side"] == "buy" else "🔴 SELL"
             trade_data.append({
-                "Время": t.get("timestamp", "")[:16],
+                "Время": fmt_time(t.get("timestamp", "")),
                 "Тип": side_emoji,
                 "Кол-во": f"{t.get('amount', 0):.8f}",
                 "Цена": f"${t.get('price', 0):.2f}",
                 "P&L": f"${t.get('profit', 0):.2f}" if t["side"] == "sell" else "-",
             })
-        st.dataframe(pd.DataFrame(trade_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(trade_data), use_container_width=True, hide_index=True,
+                     height=min(600, 40 + 35 * len(trade_data)))
 
 # ═══════════════════════════════════════════
 # Управление
@@ -414,7 +508,7 @@ latest_update = max(
     (s.get("updated_at", "") for s in all_states),
     default=""
 )
-st.caption(f"Последнее обновление: {latest_update[:19]} UTC")
+st.caption(f"Последнее обновление: {fmt_time(latest_update)} UTC")
 
 # Автообновление
 if auto_refresh:

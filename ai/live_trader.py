@@ -122,6 +122,13 @@ class LiveGridTrader:
             "last_update": None,
         }
 
+        # Cooldown после стоп-лосса (не покупать N часов)
+        self._last_stop_loss_time = None
+        self._stop_loss_cooldown_hours = 3
+
+        # Защита от спама AI-решений
+        self._last_logged_decision = None
+
         # Состояние
         self.state = self._default_state()
 
@@ -405,10 +412,22 @@ class LiveGridTrader:
             logger.error("AI prediction error: %s", e)
 
     def _log_ai_decision(self, action: str, reason: str, price: float, ai_signal: float):
-        """Записывает AI-решение в лог для дашборда."""
+        """Записывает AI-решение в лог для дашборда. Фильтрует спам."""
+        # Антиспам: не логируем одинаковые блокировки чаще чем раз в 5 минут
+        decision_key = f"{action}:{reason.split(',')[0].split('(')[0].strip()}"
+        now = datetime.now(timezone.utc)
+        if action in ("block_buy", "skip_upper", "hold"):
+            if self._last_logged_decision:
+                last_key, last_time = self._last_logged_decision
+                if last_key == decision_key:
+                    elapsed = (now - last_time).total_seconds()
+                    if elapsed < 300:  # 5 минут
+                        return
+            self._last_logged_decision = (decision_key, now)
+
         decisions = self.state.get("ai_decisions", [])
         decisions.append({
-            "t": datetime.now(timezone.utc).isoformat(),
+            "t": now.isoformat(),
             "action": action,
             "reason": reason,
             "price": round(price, 2),
@@ -416,8 +435,8 @@ class LiveGridTrader:
             "rsi": self._indicator_cache.get("rsi", 50),
             "trend": self._indicator_cache.get("trend", "neutral"),
         })
-        # Храним последние 50 решений
-        if len(decisions) > 50:
+        # Храним последние 200 решений
+        if len(decisions) > 200:
             decisions.pop(0)
         self.state["ai_decisions"] = decisions
 
@@ -507,26 +526,26 @@ class LiveGridTrader:
             # ═══ BUY ═══
             if price <= lvl and lvl_key not in bought and balance >= adjusted_order_size:
 
-                # --- TREND FILTER: не покупаем в даунтренде ---
-                if trend == "down" and rsi < 35:
-                    self._log_ai_decision("block_buy", "downtrend + RSI<35", price, ai_signal)
+                # --- COOLDOWN после стоп-лосса ---
+                if self._last_stop_loss_time:
+                    hours_since_sl = (datetime.now(timezone.utc) - self._last_stop_loss_time).total_seconds() / 3600
+                    if hours_since_sl < self._stop_loss_cooldown_hours:
+                        self._log_ai_decision("block_buy", f"кулдаун после стоп-лосса ({hours_since_sl:.1f}ч/{self._stop_loss_cooldown_hours}ч)", price, ai_signal)
+                        continue
+
+                # --- TREND FILTER: блокируем ВСЕ покупки в даунтренде ---
+                if trend == "down":
+                    self._log_ai_decision("block_buy", "даунтренд — покупки заблокированы", price, ai_signal)
                     continue
 
                 # --- AI фильтр: блокируем при сильном bearish ---
                 if ai_signal < -0.4:
-                    self._log_ai_decision("block_buy", f"bearish signal {ai_signal:.2f}", price, ai_signal)
+                    self._log_ai_decision("block_buy", f"медвежий сигнал AI {ai_signal:.2f}", price, ai_signal)
                     continue
-
-                # --- Trend filter: при даунтренде только нижние уровни ---
-                if trend == "down" and self.model:
-                    grid_mid = (grid["lower"] + grid["upper"]) / 2
-                    if lvl > grid_mid:
-                        self._log_ai_decision("skip_upper", "downtrend, skip upper levels", price, ai_signal)
-                        continue
 
                 # --- RSI фильтр: не покупаем при перекупленности ---
                 if rsi > 75:
-                    self._log_ai_decision("block_buy", f"RSI overbought {rsi:.0f}", price, ai_signal)
+                    self._log_ai_decision("block_buy", f"RSI перекуплен {rsi:.0f}", price, ai_signal)
                     continue
 
                 amount = adjusted_order_size / price
@@ -570,16 +589,22 @@ class LiveGridTrader:
                             except Exception:
                                 pass
 
+                # --- Минимальная прибыль для продажи (чтобы не терять на комиссиях) ---
+                min_profit_pct = self.config.fee_rate * 200 + 0.1  # комиссия x2 + 0.1% запас
+                if 0 < price_gain_pct < min_profit_pct:
+                    self._log_ai_decision("hold", f"прибыль {price_gain_pct:.2f}% < мин {min_profit_pct:.1f}%", price, ai_signal)
+                    continue
+
                 # --- RSI фильтр: при перепроданности не продаём (цена может отскочить) ---
                 if rsi < 25 and price_gain_pct < 0:
-                    self._log_ai_decision("hold_oversold", f"RSI={rsi:.0f}, wait for bounce", price, ai_signal)
+                    self._log_ai_decision("hold_oversold", f"RSI={rsi:.0f}, ждём отскок", price, ai_signal)
                     continue
 
                 # Стоп-лосс / trailing stop проверка
                 force_sell = self.safety.check_should_force_sell(pos, price)
                 if force_sell:
                     logger.warning("🔴 СТОП-ЛОСС: принудительная продажа!")
-                    self._log_ai_decision("stop_loss", f"loss {price_gain_pct:.1f}%", price, ai_signal)
+                    self._log_ai_decision("stop_loss", f"убыток {price_gain_pct:.1f}%", price, ai_signal)
 
                 amount = pos["amount"]
                 order = self._place_order("sell", price, amount, lvl)
@@ -591,7 +616,7 @@ class LiveGridTrader:
                     self.state["balance"] += sell_value
                     del bought[lvl_key]
                     self._log_trade("sell", price, amount, order, profit)
-                    self._log_ai_decision("sell", f"gain={price_gain_pct:.1f}%, profit=${profit:.2f}", price, ai_signal)
+                    self._log_ai_decision("sell", f"прибыль={price_gain_pct:.1f}%, P&L=${profit:.2f}", price, ai_signal)
 
         # ═══ Trailing stop + стоп-лосс для всех позиций ═══
         for lvl_key in list(bought.keys()):
@@ -613,7 +638,9 @@ class LiveGridTrader:
                     del bought[lvl_key]
                     self._log_trade("sell", price, amount, order, profit)
                     loss_pct = (pos["buy_price"] - price) / pos["buy_price"] * 100
-                    self._log_ai_decision("forced_sell", f"trailing/stop loss {loss_pct:.1f}%", price, ai_signal)
+                    self._log_ai_decision("forced_sell", f"стоп-лосс {loss_pct:.1f}%", price, ai_signal)
+                    # Устанавливаем cooldown после стоп-лосса
+                    self._last_stop_loss_time = datetime.now(timezone.utc)
 
         # 8. Обновляем equity
         holdings_value = sum(pos["amount"] * price for pos in bought.values())
