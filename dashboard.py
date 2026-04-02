@@ -229,16 +229,87 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════
-# Общая сводка портфеля
+# Общая сводка портфеля (одна строка HTML)
 # ═══════════════════════════════════════════
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-with c1: metric_card("Портфель", f"${total_equity:.2f}", "blue")
-with c2: metric_card("P&L", f"${total_pnl:+.2f} ({total_pnl_pct:+.1f}%)", "green" if total_pnl >= 0 else "red")
-with c3: metric_card("Позиции", f"{total_positions}", "amber")
-with c4: metric_card(f"Реализовано ({sell_trades} сд.)", f"${total_realized:+.2f}", "green" if total_realized >= 0 else "red")
-with c5: metric_card("Макс. просадка", f"{max_dd:.1f}%", "red" if max_dd > 5 else "amber")
-with c6: metric_card("Всего сделок", f"{total_trades}", "blue")
+pnl_cls = "green" if total_pnl >= 0 else "red"
+real_cls = "green" if total_realized >= 0 else "red"
+dd_cls = "red" if max_dd > 5 else "amber"
+
+st.markdown(f"""
+<div style="display:flex; gap:10px; margin-bottom:10px;">
+    <div class="metric-box" style="flex:1; min-width:0;">
+        <div class="metric-label">Портфель</div>
+        <div class="metric-value blue">${total_equity:.2f}</div>
+    </div>
+    <div class="metric-box" style="flex:1; min-width:0;">
+        <div class="metric-label">P&L</div>
+        <div class="metric-value {pnl_cls}">${total_pnl:+.2f} ({total_pnl_pct:+.1f}%)</div>
+    </div>
+    <div class="metric-box" style="flex:1; min-width:0;">
+        <div class="metric-label">Позиции</div>
+        <div class="metric-value amber">{total_positions}</div>
+    </div>
+    <div class="metric-box" style="flex:1; min-width:0;">
+        <div class="metric-label">Реализовано ({sell_trades} сд.)</div>
+        <div class="metric-value {real_cls}">${total_realized:+.2f}</div>
+    </div>
+    <div class="metric-box" style="flex:1; min-width:0;">
+        <div class="metric-label">Макс. просадка</div>
+        <div class="metric-value {dd_cls}">{max_dd:.1f}%</div>
+    </div>
+    <div class="metric-box" style="flex:1; min-width:0;">
+        <div class="metric-label">Всего сделок</div>
+        <div class="metric-value blue">{total_trades}</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════
+# 3 последние сделки (под сводкой)
+# ═══════════════════════════════════════════
+
+all_recent_trades = []
+for s in all_states:
+    sym = s.get("symbol", "?")
+    for t in s.get("trade_history", []):
+        t_copy = dict(t)
+        t_copy["_symbol"] = sym
+        all_recent_trades.append(t_copy)
+
+# Сортируем по времени (новые первые)
+all_recent_trades.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+last_3 = all_recent_trades[:3]
+
+if last_3:
+    trades_html = '<div style="display:flex; gap:10px; margin-bottom:15px;">'
+    for t in last_3:
+        side = t.get("side", "?")
+        is_buy = side == "buy"
+        side_icon = "🟢 BUY" if is_buy else "🔴 SELL"
+        side_color = "#00e676" if is_buy else "#ff5252"
+        sym = t.get("_symbol", "?")
+        price = t.get("price", 0)
+        amount = t.get("amount", 0)
+        ts = fmt_time(t.get("timestamp", ""))
+        profit = t.get("profit", 0)
+        profit_str = f" | P&L: ${profit:+.2f}" if not is_buy else ""
+        profit_color = "#00e676" if profit >= 0 else "#ff5252"
+
+        trades_html += f"""
+        <div class="metric-box" style="flex:1; min-width:0; padding:12px 16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="color:{side_color}; font-weight:700; font-size:14px;">{side_icon}</span>
+                <span style="color:#8b95a5; font-size:12px;">{ts}</span>
+            </div>
+            <div style="color:white; font-size:16px; font-weight:600; margin-top:4px;">{sym} @ ${price:,.2f}</div>
+            <div style="color:#8b95a5; font-size:12px; margin-top:2px;">
+                Кол-во: {amount:.6f}{'<span style="color:' + profit_color + '; margin-left:8px;">' + f'P&L: ${profit:+.2f}' + '</span>' if not is_buy else ''}
+            </div>
+        </div>
+        """
+    trades_html += "</div>"
+    st.markdown(trades_html, unsafe_allow_html=True)
 
 st.markdown("")
 
