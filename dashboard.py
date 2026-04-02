@@ -9,7 +9,10 @@ import os
 import json
 import time
 from glob import glob
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# Каирское время (UTC+2)
+CAIRO_TZ = timezone(timedelta(hours=2))
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -93,12 +96,15 @@ def metric_card(label, value, color="white", small=False):
 
 
 def fmt_time(iso_str: str) -> str:
-    """Форматирует ISO время в красивый вид: 02.04 15:31"""
+    """Форматирует ISO время в каирское время: 02.04 17:31"""
     if not iso_str:
         return "-"
     try:
         dt = datetime.fromisoformat(iso_str)
-        return dt.strftime("%d.%m %H:%M")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_cairo = dt.astimezone(CAIRO_TZ)
+        return dt_cairo.strftime("%d.%m %H:%M")
     except Exception:
         return iso_str[:16]
 
@@ -573,7 +579,7 @@ latest_update = max(
     (s.get("updated_at", "") for s in all_states),
     default=""
 )
-st.caption(f"Последнее обновление: {fmt_time(latest_update)} UTC")
+st.caption(f"Последнее обновление: {fmt_time(latest_update)} (Каир)")
 
 # Автообновление
 if auto_refresh:
