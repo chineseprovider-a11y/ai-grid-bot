@@ -519,12 +519,18 @@ class LiveGridTrader:
 
         balance = self.state["balance"]
         bought = grid["bought_levels"]
+        buys_this_cycle = 0  # Лимит покупок за цикл
+        MAX_BUYS_PER_CYCLE = 2
 
         for lvl in grid["levels"]:
             lvl_key = str(lvl)
 
             # ═══ BUY ═══
             if price <= lvl and lvl_key not in bought and balance >= adjusted_order_size:
+
+                # --- Лимит покупок за цикл ---
+                if buys_this_cycle >= MAX_BUYS_PER_CYCLE:
+                    break
 
                 # --- COOLDOWN после стоп-лосса ---
                 if self._last_stop_loss_time:
@@ -568,6 +574,7 @@ class LiveGridTrader:
                     self.state["balance"] -= adjusted_order_size
                     self._log_trade("buy", price, amount, order)
                     self._log_ai_decision("buy", f"signal={ai_signal:.2f}, rsi={rsi:.0f}, trend={trend}", price, ai_signal)
+                    buys_this_cycle += 1
 
             # ═══ SELL ═══
             elif price >= lvl and lvl_key in bought:
